@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 libghostty-vt = "0.2"
-nix = { version = "0.31", features = ["term", "process"] }
+nix = { version = "0.31", features = ["term", "process", "poll"] }
 libc = "0.2"
