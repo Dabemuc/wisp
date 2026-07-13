@@ -1,32 +1,61 @@
+use std::ffi::CString;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
+
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
+use nix::pty::{ForkptyResult, Winsize, forkpty};
+use nix::unistd::execvp;
+
+const ROWS: u16 = 8;
+const COLS: u16 = 24;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut term = Terminal::new(TerminalOptions {
-        cols: 24,
-        rows: 24,
-        max_scrollback: 10_000,
-    })?;
+    let ws = Winsize { ws_row: ROWS, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 };
 
-    // The main application loop
-    let mut iter_count = 0;
-    loop {
-        // write-back for query responses (e.g. DA, kitty graphics acks) → goes to the lower PTY
-        term.on_pty_write(|_term, data| {
-            // forward `data` to the PTY master
-            let _ = data;
-        })?;
-
-        // Feed simulated data bytes read from the lower PTY into the emulator
-        let data = format!("\x1b[1;32mhello {iter_count}\x1b[0m\r\n");
-        term.vt_write(data.as_bytes());
-
-        // compose state to frame
-        compose(&term)?;
-        iter_count += 1;
+    // forkpty = openpty + fork + (in the child) setsid + TIOCSCTTY + dup2 the
+    // slave onto stdin/stdout/stderr.
+    match unsafe { forkpty(&ws, None)? } {
+        ForkptyResult::Child => {
+            // We ARE the shell now. stdin/out/err already point at the PTY slave.
+            let path = CString::new("/bin/zsh").unwrap();
+            let arg0 = CString::new("zsh").unwrap();
+            let _ = execvp(&path, &[arg0]);   // replaces this process image
+            unsafe { libc::_exit(1) }         // only reached if exec failed
+        }
+        ForkptyResult::Parent { child: _, master } => run_parent(master),
     }
 }
 
+fn run_parent(master: OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
+    let mut term = Terminal::new(TerminalOptions {
+        cols: COLS,
+        rows: ROWS,
+        max_scrollback: 10_000,
+    })?;
+
+    // `master` is our end of the pipe. A File gives us blocking read/write.
+    let mut master = File::from(master);
+
+    // Drive the shell with a fixed script so this first step is deterministic.
+    master.write_all(b"echo hello from wisp\r\n")?;
+    master.write_all(b"exit\r\n")?;
+
+    // Read the shell's output until it exits (EOF), feeding it to the emulator.
+    let mut buf = [0u8; 4096];
+    loop {
+        match master.read(&mut buf) {
+            Ok(0) => break,                                  // shell exited
+            Ok(n) => term.vt_write(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    compose(&term)?;   // render the final grid once
+    Ok(())
+}
 
 /// snapshot + iterate the grid to build the composited frame
 fn compose(term: &Terminal) -> Result<(), Box<dyn std::error::Error>> {
