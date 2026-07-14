@@ -1,4 +1,7 @@
-use std::{collections::HashMap, os::fd::BorrowedFd};
+use std::{
+    collections::{HashMap, HashSet},
+    os::fd::BorrowedFd,
+};
 
 use nix::pty::Winsize;
 
@@ -257,20 +260,35 @@ impl WindowHandle {
         frame.push_str("\x1b[?25l"); // hide the cursor once while we redraw everything
         self.composite_pane_tree(&self.pane_tree_root, &pane_frames, &mut frame)?;
 
-        // Paint the dividers into their reserved gap cells (on top of the panes).
+        // Rasterize every divider segment into a set of border cells, so we can pick
+        // each cell's glyph from which neighbors are also borders (junctions fall out).
+        let mut cells: HashSet<(u16, u16)> = HashSet::new();
+        for b in &self.borders {
+            for i in 0..b.len {
+                let cell = if b.vertical {
+                    (b.x, b.y + i)
+                } else {
+                    (b.x + i, b.y)
+                };
+                cells.insert(cell);
+            }
+        }
+
+        // Paint each border cell once, choosing the box-drawing glyph from its arms.
         use std::fmt::Write as _;
         frame.push_str("\x1b[0m"); // borders in the default pen
-        for b in &self.borders {
-            if b.vertical {
-                for i in 0..b.len {
-                    write!(frame, "\x1b[{};{}H\u{2502}", b.y + i + 1, b.x + 1)?; // │
-                }
-            } else {
-                write!(frame, "\x1b[{};{}H", b.y + 1, b.x + 1)?;
-                for _ in 0..b.len {
-                    frame.push('\u{2500}'); // ─
-                }
-            }
+        for &(x, y) in &cells {
+            let up = y > 0 && cells.contains(&(x, y - 1));
+            let down = cells.contains(&(x, y + 1));
+            let left = x > 0 && cells.contains(&(x - 1, y));
+            let right = cells.contains(&(x + 1, y));
+            write!(
+                frame,
+                "\x1b[{};{}H{}",
+                y + 1,
+                x + 1,
+                box_glyph(up, down, left, right)
+            )?;
         }
 
         Ok((frame, focused_cursor))
@@ -336,5 +354,27 @@ impl WindowHandle {
 
         // Tree changed -> recompute all rectangles.
         self.relayout()
+    }
+}
+
+/// Pick the box-drawing glyph for a border cell from which of its 4 neighbors are also
+/// borders. A lone vertical/horizontal arm falls back to the straight line.
+fn box_glyph(up: bool, down: bool, left: bool, right: bool) -> char {
+    match (up, down, left, right) {
+        (true, true, true, true) => '┼',
+        (true, true, true, false) => '┤',
+        (true, true, false, true) => '├',
+        (true, true, false, false) => '│',
+        (true, false, true, true) => '┴',
+        (false, true, true, true) => '┬',
+        (true, false, true, false) => '┘',
+        (true, false, false, true) => '└',
+        (false, true, true, false) => '┐',
+        (false, true, false, true) => '┌',
+        (false, false, true, true) => '─',
+        // Stubs (segment ends): render as the straight line they belong to.
+        (true, false, false, false) | (false, true, false, false) => '│',
+        (false, false, true, false) | (false, false, false, true) => '─',
+        (false, false, false, false) => ' ',
     }
 }
