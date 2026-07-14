@@ -13,6 +13,13 @@ pub enum SplitDirection {
 
 type PaneId = usize;
 
+struct Border {
+    x: u16,
+    y: u16,
+    len: u16,
+    vertical: bool,
+}
+
 enum PaneTreeNode {
     Leaf(PaneId),
     Split {
@@ -26,9 +33,14 @@ impl PaneTreeNode {
     /// Splits divide the space evenly, accumulating x/y offsets so children sit side by
     /// side (or stacked), and the last child absorbs the division remainder so the area
     /// fills exactly.
-    fn layout(&self, rect: PaneRect, out: &mut Vec<(PaneId, PaneRect)>) {
+    fn layout(
+        &self,
+        rect: PaneRect,
+        out_panes: &mut Vec<(PaneId, PaneRect)>,
+        out_borders: &mut Vec<Border>,
+    ) {
         match self {
-            PaneTreeNode::Leaf(pane_id) => out.push((*pane_id, rect)),
+            PaneTreeNode::Leaf(pane_id) => out_panes.push((*pane_id, rect)),
             PaneTreeNode::Split { dir, children } => {
                 let n = children.len() as u16;
                 if n == 0 {
@@ -37,40 +49,53 @@ impl PaneTreeNode {
                 match dir {
                     // Stacked: divide the rows, advance y down the screen.
                     SplitDirection::SplitHorizontal => {
-                        let base = rect.rows / n;
+                        // Reserve one row per interior divider, split the rest evenly.
+                        let base = rect.rows.saturating_sub(n - 1) / n;
                         let mut y = rect.y;
                         for (i, child) in children.iter().enumerate() {
                             let last = i as u16 == n - 1;
+                            // Last child absorbs the remainder so the area fills exactly.
                             let rows = if last { rect.y + rect.rows - y } else { base };
                             child.layout(
-                                PaneRect {
-                                    x: rect.x,
-                                    y,
-                                    cols: rect.cols,
-                                    rows,
-                                },
-                                out,
+                                PaneRect { x: rect.x, y, cols: rect.cols, rows },
+                                out_panes,
+                                out_borders,
                             );
                             y += rows;
+                            if !last {
+                                out_borders.push(Border {
+                                    x: rect.x,
+                                    y,
+                                    len: rect.cols,
+                                    vertical: false,
+                                });
+                                y += 1; // skip the divider row
+                            }
                         }
                     }
                     // Side by side: divide the columns, advance x across the screen.
                     SplitDirection::SplitVertical => {
-                        let base = rect.cols / n;
+                        // Reserve one column per interior divider, split the rest evenly.
+                        let base = rect.cols.saturating_sub(n - 1) / n;
                         let mut x = rect.x;
                         for (i, child) in children.iter().enumerate() {
                             let last = i as u16 == n - 1;
                             let cols = if last { rect.x + rect.cols - x } else { base };
                             child.layout(
-                                PaneRect {
-                                    x,
-                                    y: rect.y,
-                                    cols,
-                                    rows: rect.rows,
-                                },
-                                out,
+                                PaneRect { x, y: rect.y, cols, rows: rect.rows },
+                                out_panes,
+                                out_borders,
                             );
                             x += cols;
+                            if !last {
+                                out_borders.push(Border {
+                                    x,
+                                    y: rect.y,
+                                    len: rect.rows,
+                                    vertical: true,
+                                });
+                                x += 1; // skip the divider column
+                            }
                         }
                     }
                 }
@@ -147,6 +172,8 @@ pub struct WindowHandle {
     focused_pane_id: PaneId,
     // The whole window's rectangle — the root area the tree is laid out within.
     current_rect: PaneRect,
+    // Divider segments from the last layout pass, painted every render.
+    borders: Vec<Border>,
 }
 
 impl WindowHandle {
@@ -158,6 +185,7 @@ impl WindowHandle {
             pane_id_counter: 1,
             focused_pane_id: 0,
             current_rect: rect,
+            borders: Vec::new(),
         })
     }
 
@@ -197,13 +225,17 @@ impl WindowHandle {
     /// Recompute every pane's rectangle from the tree and apply it. Call after any
     /// change to size or tree structure (resize, split, close).
     fn relayout(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut out = Vec::new();
-        self.pane_tree_root.layout(self.current_rect, &mut out);
-        for (pane_id, rect) in out {
+        let mut out_panes = Vec::new();
+        let mut out_borders = Vec::new();
+        self.pane_tree_root
+            .layout(self.current_rect, &mut out_panes, &mut out_borders);
+        for (pane_id, rect) in out_panes {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
                 pane.resize(rect)?;
             }
         }
+        // Stash the dividers so render() can paint them (it doesn't recompute layout).
+        self.borders = out_borders;
         Ok(())
     }
 
@@ -224,6 +256,22 @@ impl WindowHandle {
         let mut frame = String::new();
         frame.push_str("\x1b[?25l"); // hide the cursor once while we redraw everything
         self.composite_pane_tree(&self.pane_tree_root, &pane_frames, &mut frame)?;
+
+        // Paint the dividers into their reserved gap cells (on top of the panes).
+        use std::fmt::Write as _;
+        frame.push_str("\x1b[0m"); // borders in the default pen
+        for b in &self.borders {
+            if b.vertical {
+                for i in 0..b.len {
+                    write!(frame, "\x1b[{};{}H\u{2502}", b.y + i + 1, b.x + 1)?; // │
+                }
+            } else {
+                write!(frame, "\x1b[{};{}H", b.y + 1, b.x + 1)?;
+                for _ in 0..b.len {
+                    frame.push('\u{2500}'); // ─
+                }
+            }
+        }
 
         Ok((frame, focused_cursor))
     }
