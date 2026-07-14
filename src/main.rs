@@ -11,6 +11,7 @@ use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction
 mod mux;
 mod pane_handle;
 mod raw_mode_guard;
+mod window_handle;
 
 use mux::Mux;
 use raw_mode_guard::RawModeGuard;
@@ -51,11 +52,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // --- reactor: who has data? (poll only, no reading) ---
         let (stdin_ready, ready_panes) = {
-            let pane_fds: Vec<(usize, BorrowedFd)> = mux.pane_fds().collect();
+            let pane_fds: Vec<(usize, usize, BorrowedFd)> = mux.pane_fds().collect();
 
             let mut fds = Vec::with_capacity(pane_fds.len() + 1);
             fds.push(PollFd::new(stdin.as_fd(), PollFlags::POLLIN));
-            for (_, fd) in &pane_fds {
+            for (_, _, fd) in &pane_fds {
                 fds.push(PollFd::new(fd.as_fd(), PollFlags::POLLIN));
             }
 
@@ -71,11 +72,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
             };
             let stdin_ready = readable(&fds[0]);
-            let ready_panes: Vec<usize> = pane_fds
+            let ready_panes: Vec<(usize, usize)> = pane_fds
                 .iter()
                 .enumerate()
                 .filter(|(slot, _)| readable(&fds[slot + 1]))
-                .map(|(_, (id, _))| *id)
+                .map(|(_, (window_id, pane_id, _))| (*window_id, *pane_id))
                 .collect();
             (stdin_ready, ready_panes)
         }; // pane_fds/fds dropped here -> mux is free for &mut again
@@ -92,14 +93,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // --- pane output: mux pumps each pane the reactor flagged readable ---
         let had_output = !ready_panes.is_empty();
         let mut exited = Vec::new();
-        for &id in &ready_panes {
-            if !mux.pump(id)? {
-                exited.push(id);
+        for &(window_id, pane_id) in &ready_panes {
+            if !mux.pump(window_id, pane_id)? {
+                exited.push((window_id, pane_id));
             }
         }
         // Remove exited panes high-index-first so lower indices stay valid.
-        for id in exited.into_iter().rev() {
-            if mux.close_pane(id) == 0 {
+        for (window_id, pane_id) in exited.into_iter().rev() {
+            if mux.close_pane(window_id, pane_id) == 0 {
                 return Ok(()); // last pane's shell exited -> quit
             }
         }

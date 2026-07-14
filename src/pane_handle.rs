@@ -70,7 +70,7 @@ impl PaneHandle {
         let mut buf = [0u8; 8192];
         loop {
             match self.master.read(&mut buf) {
-                Ok(0) => return Ok(false),                                    // shell exited
+                Ok(0) => return Ok(false), // shell exited
                 Ok(n) => self.term.vt_write(&buf[..n]),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(true), // drained
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -88,7 +88,7 @@ impl PaneHandle {
     }
 
     /// snapshot + iterate the grid to build the composited frame
-    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn render(&mut self) -> Result<String, Box<dyn std::error::Error>> {
         use std::fmt::Write as _;
 
         let snap = self.render.update(&self.term)?;
@@ -146,24 +146,37 @@ impl PaneHandle {
             let blink = snap.cursor_blinking()?;
             let shape = match snap.cursor_visual_style()? {
                 CursorVisualStyle::Block | CursorVisualStyle::BlockHollow => {
-                    if blink { 1 } else { 2 }
+                    if blink {
+                        1
+                    } else {
+                        2
+                    }
                 }
                 CursorVisualStyle::Underline => {
-                    if blink { 3 } else { 4 }
+                    if blink {
+                        3
+                    } else {
+                        4
+                    }
                 }
                 CursorVisualStyle::Bar => {
-                    if blink { 5 } else { 6 }
+                    if blink {
+                        5
+                    } else {
+                        6
+                    }
                 }
                 _ => 2, // non_exhaustive fallback: steady block
             };
-            write!(frame, "\x1b[{shape} q\x1b[{};{}H\x1b[?25h", cur.y + 1, cur.x + 1)?;
+            write!(
+                frame,
+                "\x1b[{shape} q\x1b[{};{}H\x1b[?25h",
+                cur.y + 1,
+                cur.x + 1
+            )?;
         }
 
-        // One write for the whole frame, instead of a syscall per line.
-        let mut out = std::io::stdout().lock();
-        out.write_all(frame.as_bytes())?;
-        out.flush()?;
-        Ok(())
+        Ok(frame.clone())
     }
 }
 
