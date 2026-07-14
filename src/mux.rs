@@ -232,7 +232,11 @@ impl Mux {
                 }
             }
 
-            self.render()? // rerender everything
+            // Only redraw if a window still exists — otherwise there's no focused
+            // window to render (we're about to quit) and render() would error.
+            if !self.windows.is_empty() {
+                self.render()?; // rerender everything
+            }
         }
 
         Ok(self.windows.len())

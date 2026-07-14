@@ -30,6 +30,12 @@ extern "C" fn on_sigwinch(_: libc::c_int) {
 nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Child shells must see a TERM that matches what libghostty-vt emulates. Inheriting
+    // the outer terminal's TERM (e.g. xterm-ghostty) makes zsh's line editor mis-set the
+    // tty and double-echo input. Set it once, before any pane is forked, so all inherit.
+    // SAFETY: single-threaded here, before any fork/thread.
+    unsafe { std::env::set_var("TERM", "xterm-256color") };
+
     // --- reactor setup: our real terminal + OS event sources ---
     let action = SigAction::new(
         SigHandler::Handler(on_sigwinch),
