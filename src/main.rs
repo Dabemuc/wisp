@@ -1,18 +1,19 @@
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::pty::Winsize;
-use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
-mod raw_mode_guard;
-use raw_mode_guard::RawModeGuard;
-
+mod mux;
 mod pane_handle;
-use pane_handle::PaneHandle;
+mod raw_mode_guard;
+
+use mux::Mux;
+use raw_mode_guard::RawModeGuard;
 
 const ROWS: u16 = 32;
 const COLS: u16 = 80;
@@ -23,69 +24,104 @@ extern "C" fn on_sigwinch(_: libc::c_int) {
     RESIZED.store(true, Ordering::SeqCst); // async-signal-safe: just a flag
 }
 
+nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let action = SigAction::new(SigHandler::Handler(on_sigwinch), SaFlags::empty(), SigSet::empty());
+    // --- reactor setup: our real terminal + OS event sources ---
+    let action = SigAction::new(
+        SigHandler::Handler(on_sigwinch),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
     unsafe { sigaction(Signal::SIGWINCH, &action)? };
 
-    let ws = query_winsize();
-
+    // `_raw` lives until main returns, so raw mode is restored on exit.
     let _raw = RawModeGuard::enable()?;
-    let mut pane = PaneHandle::new(ws)?;
     let mut stdin = File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
+
+    let mut mux = Mux::new(query_winsize())?;
 
     let mut buf = [0u8; 4096];
     loop {
+        // resize signal -> re-measure -> tell the mux
         if RESIZED.swap(false, Ordering::SeqCst) {
-            let ws = query_winsize();
-            pane.resize(ws)?;
-            pane.render()?;
+            mux.resize(query_winsize())?;
+            mux.render()?;
         }
 
-        let (key_ready, shell_ready) = {
-            let mut fds = [
-                PollFd::new(stdin.as_fd(), PollFlags::POLLIN),
-                PollFd::new(pane.as_fd(), PollFlags::POLLIN),
-            ];
+        // --- reactor: who has data? (poll only, no reading) ---
+        let (stdin_ready, ready_panes) = {
+            let pane_fds: Vec<(usize, BorrowedFd)> = mux.pane_fds().collect();
+
+            let mut fds = Vec::with_capacity(pane_fds.len() + 1);
+            fds.push(PollFd::new(stdin.as_fd(), PollFlags::POLLIN));
+            for (_, fd) in &pane_fds {
+                fds.push(PollFd::new(fd.as_fd(), PollFlags::POLLIN));
+            }
+
             match poll(&mut fds, PollTimeout::NONE) {
                 Ok(_) => {}
-                Err(Errno::EINTR) => continue, // a signal (likely SIGWINCH) woke us — go handle the flag
+                Err(Errno::EINTR) => continue, // signal (e.g. SIGWINCH) — loop to handle the flag
                 Err(e) => return Err(e.into()),
             }
+
             let readable = |f: &PollFd| {
                 f.revents()
                     .unwrap_or(PollFlags::empty())
                     .intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
             };
-            (readable(&fds[0]), readable(&fds[1]))
-        };
+            let stdin_ready = readable(&fds[0]);
+            let ready_panes: Vec<usize> = pane_fds
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| readable(&fds[slot + 1]))
+                .map(|(_, (id, _))| *id)
+                .collect();
+            (stdin_ready, ready_panes)
+        }; // pane_fds/fds dropped here -> mux is free for &mut again
 
-        if key_ready {
+        // --- keyboard: reactor reads the bytes, mux decides where they go ---
+        if stdin_ready {
             let n = stdin.read(&mut buf)?;
             if n == 0 {
                 break;
             }
-            pane.write_input(&buf[..n])?;
+            mux.handle_input(&buf[..n])?;
         }
 
-        if shell_ready {
-            if !pane.pump()? {
-                break; // shell exited
+        // --- pane output: mux pumps each pane the reactor flagged readable ---
+        let had_output = !ready_panes.is_empty();
+        let mut exited = Vec::new();
+        for &id in &ready_panes {
+            if !mux.pump(id)? {
+                exited.push(id);
             }
-            pane.render()?;
+        }
+        // Remove exited panes high-index-first so lower indices stay valid.
+        for id in exited.into_iter().rev() {
+            if mux.close_pane(id) == 0 {
+                return Ok(()); // last pane's shell exited -> quit
+            }
+        }
+        if had_output {
+            mux.render()?;
         }
     }
 
     Ok(())
 }
 
-nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
-
 /// Ask the real terminal (fd 0) for its current size.
 fn query_winsize() -> Winsize {
-    let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    let mut ws = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     let ok = unsafe { tiocgwinsz(std::io::stdin().as_raw_fd(), &mut ws) }.is_ok();
     if !ok || ws.ws_col == 0 || ws.ws_row == 0 {
-        ws.ws_col = COLS; // your consts become fallbacks
+        ws.ws_col = COLS; // fallback when stdin isn't a tty
         ws.ws_row = ROWS;
     }
     ws

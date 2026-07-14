@@ -70,39 +70,35 @@ impl PaneHandle {
         Ok(())
     }
 
+    /// snapshot + iterate the grid to build the composited frame
     pub fn render(&self) -> Result<(), Box<dyn std::error::Error>> {
-        compose(&self.term)
-    }
-}
+        let mut render = RenderState::new()?;
+        let mut rows = RowIterator::new()?;
+        let mut cells = CellIterator::new()?;
 
-/// snapshot + iterate the grid to build the composited frame
-fn compose(term: &Terminal) -> Result<(), Box<dyn std::error::Error>> {
-    let mut render = RenderState::new()?;
-    let mut rows = RowIterator::new()?;
-    let mut cells = CellIterator::new()?;
+        let mut out = std::io::stdout().lock();
+        write!(out, "\x1b[H")?; // cursor home — redraw over the previous frame
 
-    let mut out = std::io::stdout().lock();
-    write!(out, "\x1b[H")?; // cursor home — redraw over the previous frame
+        let snap = render.update(&self.term)?;
+        let mut row_iter = rows.update(&snap)?;
+        let mut first = true;
+        while let Some(row) = row_iter.next() {
+            // Newline BETWEEN rows, not after the last one — a trailing \r\n on the
+            // bottom line scrolls the whole terminal up and eats the top row.
+            if !first {
+                write!(out, "\r\n")?;
+            }
+            first = false;
 
-    let snap = render.update(term)?;
-    let mut row_iter = rows.update(&snap)?;
-    let mut first = true;
-    while let Some(row) = row_iter.next() {
-        // Newline BETWEEN rows, not after the last one — a trailing \r\n on the
-        // bottom line scrolls the whole terminal up and eats the top row.
-        if !first {
-            write!(out, "\r\n")?;
+            let mut cell_iter = cells.update(row)?;
+            while let Some(cell) = cell_iter.next() {
+                let graphemes: Vec<char> = cell.graphemes()?;
+                write!(out, "{}", graphemes.into_iter().collect::<String>())?;
+            }
+            write!(out, "\x1b[K")?; // clear to end of line (no newline)
         }
-        first = false;
-
-        let mut cell_iter = cells.update(row)?;
-        while let Some(cell) = cell_iter.next() {
-            let graphemes: Vec<char> = cell.graphemes()?;
-            write!(out, "{}", graphemes.into_iter().collect::<String>())?;
-        }
-        write!(out, "\x1b[K")?; // clear to end of line (no newline)
+        write!(out, "\x1b[J")?; // clear any leftover rows below the bottom of the grid
+        out.flush()?;
+        Ok(())
     }
-    write!(out, "\x1b[J")?; // clear any leftover rows below the bottom of the grid
-    out.flush()?;
-    Ok(())
 }
