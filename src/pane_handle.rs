@@ -86,14 +86,23 @@ fn compose(term: &Terminal) -> Result<(), Box<dyn std::error::Error>> {
 
     let snap = render.update(term)?;
     let mut row_iter = rows.update(&snap)?;
+    let mut first = true;
     while let Some(row) = row_iter.next() {
+        // Newline BETWEEN rows, not after the last one — a trailing \r\n on the
+        // bottom line scrolls the whole terminal up and eats the top row.
+        if !first {
+            write!(out, "\r\n")?;
+        }
+        first = false;
+
         let mut cell_iter = cells.update(row)?;
         while let Some(cell) = cell_iter.next() {
             let graphemes: Vec<char> = cell.graphemes()?;
             write!(out, "{}", graphemes.into_iter().collect::<String>())?;
         }
-        write!(out, "\x1b[K\r\n")?; // clear to end of line, then CR+LF (raw mode!)
+        write!(out, "\x1b[K")?; // clear to end of line (no newline)
     }
+    write!(out, "\x1b[J")?; // clear any leftover rows below the bottom of the grid
     out.flush()?;
     Ok(())
 }
