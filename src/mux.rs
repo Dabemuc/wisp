@@ -113,9 +113,13 @@ impl Mux {
     /// Remove a pane whose shell has exited (also on non focused windows).
     /// Remove window if no pane remains.
     /// Return the number of windows remaining.
-    pub fn close_pane(&mut self, window_id: usize, pane_id: usize) -> usize {
+    pub fn close_pane(
+        &mut self,
+        window_id: usize,
+        pane_id: usize,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         if let Some(window) = self.windows.get_mut(&window_id) {
-            let remaining_panes = window.close_pane(pane_id);
+            let remaining_panes = window.close_pane(pane_id)?;
             if remaining_panes == 0 {
                 self.windows.remove(&window_id);
                 if self.focused_window_id == window_id {
@@ -123,6 +127,6 @@ impl Mux {
                 }
             }
         }
-        self.windows.len()
+        Ok(self.windows.len())
     }
 }

@@ -10,6 +10,8 @@ use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::unistd::execvp;
 
+use crate::geometry::PaneRect;
+
 nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 pub struct PaneHandle {
@@ -21,10 +23,33 @@ pub struct PaneHandle {
     cells: CellIterator<'static>,
     // Reused output buffer: the whole frame is built here, then written in one syscall.
     frame: String,
+    // Where this pane sits on the real screen. `x`/`y` are used only for rendering;
+    // `cols`/`rows` are what the pty/emulator get.
+    rect: PaneRect,
+}
+
+/// What a pane produces for one frame: its cells (positioned absolutely), plus where
+/// its cursor is *in screen coordinates* — the window decides whether to show it.
+pub struct PaneRender {
+    pub frame: String,
+    pub cursor: Option<PaneCursor>,
+}
+
+pub struct PaneCursor {
+    pub screen_x: u16, // 1-based column on the real screen
+    pub screen_y: u16, // 1-based row on the real screen
+    pub shape: u8,     // DECSCUSR code
 }
 
 impl PaneHandle {
-    pub fn new(ws: Winsize) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(rect: PaneRect) -> Result<Self, Box<dyn std::error::Error>> {
+        // The pty/emulator only know size, not position — drop x/y here.
+        let ws = Winsize {
+            ws_row: rect.rows,
+            ws_col: rect.cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         match unsafe { forkpty(&ws, None)? } {
             ForkptyResult::Child => {
                 let path = CString::new("/bin/zsh").unwrap();
@@ -34,8 +59,8 @@ impl PaneHandle {
             }
             ForkptyResult::Parent { child: _, master } => {
                 let term = Terminal::new(TerminalOptions {
-                    cols: ws.ws_col,
-                    rows: ws.ws_row,
+                    cols: rect.cols,
+                    rows: rect.rows,
                     max_scrollback: 10_000,
                 })?;
                 let master = File::from(master);
@@ -49,6 +74,7 @@ impl PaneHandle {
                     rows: RowIterator::new()?,
                     cells: CellIterator::new()?,
                     frame: String::new(),
+                    rect,
                 })
             }
         }
@@ -79,39 +105,46 @@ impl PaneHandle {
         }
     }
 
-    pub fn resize(&mut self, ws: Winsize) -> Result<(), Box<dyn std::error::Error>> {
+    /// The single PaneRect -> Winsize conversion boundary: keep x/y for rendering,
+    /// hand only cols/rows to the pty and emulator.
+    pub fn resize(&mut self, rect: PaneRect) -> Result<(), Box<dyn std::error::Error>> {
+        self.rect = rect;
+        let ws = Winsize {
+            ws_row: rect.rows,
+            ws_col: rect.cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         // 1) tell the kernel the pty's new size -> it SIGWINCHes bash/vim/…
         unsafe { tiocswinsz(self.master.as_raw_fd(), &ws)? };
         // 2) resize the emulator's grid to match (0,0 px: we're a text renderer)
-        self.term.resize(ws.ws_col, ws.ws_row, 0, 0)?;
+        self.term.resize(rect.cols, rect.rows, 0, 0)?;
         Ok(())
     }
 
-    /// snapshot + iterate the grid to build the composited frame
-    pub fn render(&mut self) -> Result<String, Box<dyn std::error::Error>> {
-        use std::fmt::Write as _;
-
+    /// Render this pane's grid into a frame, positioned at the pane's screen rect.
+    /// Draws ONLY its own columns (no clear-to-EOL, which would wipe a neighbor to the
+    /// right) and emits no cursor commands — the window owns the single real cursor.
+    pub fn render(&mut self) -> Result<PaneRender, Box<dyn std::error::Error>> {
+        let rect = self.rect; // Copy — read freely without borrowing self
         let snap = self.render.update(&self.term)?;
 
         let frame = &mut self.frame;
         frame.clear();
-        // Hide the cursor while we redraw, home, and reset the pen.
-        frame.push_str("\x1b[?25l\x1b[H\x1b[0m");
 
         let mut row_iter = self.rows.update(&snap)?;
-        let mut first = true;
-        while let Some(row) = row_iter.next() {
-            // Newline BETWEEN rows, not after the last one — a trailing \r\n on the
-            // bottom line scrolls the whole terminal up and eats the top row.
-            if !first {
-                frame.push_str("\r\n");
+        let mut row: u16 = 0;
+        while let Some(cells_row) = row_iter.next() {
+            // Absolute-position each row at (rect.x, rect.y + row), 1-based, and reset
+            // the pen — the previous row/pane may have left a non-default pen active.
+            {
+                use std::fmt::Write as _;
+                write!(frame, "\x1b[{};{}H\x1b[0m", rect.y + row + 1, rect.x + 1)?;
             }
-            first = false;
+            row += 1;
 
-            // Terminal pen is reset at each row start (we emit \x1b[0m at row end).
             let mut last_pen = Pen::DEFAULT;
-
-            let mut cell_iter = self.cells.update(row)?;
+            let mut cell_iter = self.cells.update(cells_row)?;
             while let Some(cell) = cell_iter.next() {
                 // Width: a wide glyph occupies 2 columns — render the head, skip the
                 // spacer that follows it, or everything shifts right.
@@ -134,49 +167,38 @@ impl PaneHandle {
                     frame.extend(graphemes);
                 }
             }
-            frame.push_str("\x1b[0m\x1b[K"); // reset pen, then clear to EOL in the default bg
         }
-        frame.push_str("\x1b[0m\x1b[J"); // reset, then clear any rows below the grid
 
-        // Reflect the emulator's logical cursor onto the REAL cursor: set its shape,
-        // move it to the app's cursor cell (1-based), and reveal it. If the app hid its
-        // cursor (or it scrolled off-viewport), cursor_viewport() is None -> stay hidden.
-        if let Some(cur) = snap.cursor_viewport()? {
+        // Cursor in SCREEN coordinates (pane-local + rect offset). The window shows it
+        // only for the focused pane. None => the app hid it / it's off-viewport.
+        let cursor = if let Some(cur) = snap.cursor_viewport()? {
             // DECSCUSR (CSI Ps SP q): odd codes blink, even are steady.
             let blink = snap.cursor_blinking()?;
             let shape = match snap.cursor_visual_style()? {
                 CursorVisualStyle::Block | CursorVisualStyle::BlockHollow => {
-                    if blink {
-                        1
-                    } else {
-                        2
-                    }
+                    if blink { 1 } else { 2 }
                 }
                 CursorVisualStyle::Underline => {
-                    if blink {
-                        3
-                    } else {
-                        4
-                    }
+                    if blink { 3 } else { 4 }
                 }
                 CursorVisualStyle::Bar => {
-                    if blink {
-                        5
-                    } else {
-                        6
-                    }
+                    if blink { 5 } else { 6 }
                 }
                 _ => 2, // non_exhaustive fallback: steady block
             };
-            write!(
-                frame,
-                "\x1b[{shape} q\x1b[{};{}H\x1b[?25h",
-                cur.y + 1,
-                cur.x + 1
-            )?;
-        }
+            Some(PaneCursor {
+                screen_x: rect.x + cur.x + 1,
+                screen_y: rect.y + cur.y + 1,
+                shape,
+            })
+        } else {
+            None
+        };
 
-        Ok(frame.clone())
+        Ok(PaneRender {
+            frame: frame.clone(),
+            cursor,
+        })
     }
 }
 

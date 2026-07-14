@@ -9,6 +9,7 @@ use nix::pty::Winsize;
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
 mod command_state_machine;
+mod geometry;
 mod mux;
 mod pane_handle;
 mod raw_mode_guard;
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // Remove exited panes high-index-first so lower indices stay valid.
         for (window_id, pane_id) in exited.into_iter().rev() {
-            if mux.close_pane(window_id, pane_id) == 0 {
+            if mux.close_pane(window_id, pane_id)? == 0 {
                 return Ok(()); // last pane's shell exited -> quit
             }
         }

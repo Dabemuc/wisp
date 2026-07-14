@@ -2,7 +2,8 @@ use std::{collections::HashMap, io::Write, os::fd::BorrowedFd};
 
 use nix::pty::Winsize;
 
-use crate::pane_handle::PaneHandle;
+use crate::geometry::PaneRect;
+use crate::pane_handle::{PaneCursor, PaneHandle};
 
 #[derive(Clone, Copy)]
 pub enum SplitDirection {
@@ -22,61 +23,65 @@ enum PaneTreeNode {
 }
 
 impl PaneTreeNode {
-    /// Recursively compute the layout of panes in this tree node, given the available space.
-    /// The result is a list of (pane_id, pane_winsize) tuples.
-    /// For now we just split the available space evenly among children, but later we might support user-resizable splits.
-    fn layout(&mut self, ws: Winsize, out: &mut Vec<(PaneId, Winsize)>) {
+    /// Recursively assign each leaf pane a rectangle within `rect`.
+    /// Splits divide the space evenly, accumulating x/y offsets so children sit side by
+    /// side (or stacked), and the last child absorbs the division remainder so the area
+    /// fills exactly.
+    fn layout(&self, rect: PaneRect, out: &mut Vec<(PaneId, PaneRect)>) {
         match self {
-            // Leaf node: end recursion and return the pane's size.
-            PaneTreeNode::Leaf(pane_id) => {
-                out.push((pane_id.clone(), ws));
-            }
-            // Split node: divide the available space evenly among children and recurse.
-            PaneTreeNode::Split { dir: dir, children } => {
-                let children_ws;
+            PaneTreeNode::Leaf(pane_id) => out.push((*pane_id, rect)),
+            PaneTreeNode::Split { dir, children } => {
+                let n = children.len() as u16;
+                if n == 0 {
+                    return;
+                }
                 match dir {
+                    // Stacked: divide the rows, advance y down the screen.
                     SplitDirection::SPLIT_HORIZONTAL => {
-                        let child_height = ws.ws_row / children.len() as u16;
-                        children_ws = Winsize {
-                            ws_row: child_height,
-                            ws_col: ws.ws_col,
-                            ws_xpixel: 0,
-                            ws_ypixel: 0,
-                        };
+                        let base = rect.rows / n;
+                        let mut y = rect.y;
+                        for (i, child) in children.iter().enumerate() {
+                            let last = i as u16 == n - 1;
+                            let rows = if last { rect.y + rect.rows - y } else { base };
+                            child.layout(PaneRect { x: rect.x, y, cols: rect.cols, rows }, out);
+                            y += rows;
+                        }
                     }
+                    // Side by side: divide the columns, advance x across the screen.
                     SplitDirection::SPLIT_VERTICAL => {
-                        let child_width = ws.ws_col / children.len() as u16;
-                        children_ws = Winsize {
-                            ws_row: ws.ws_row,
-                            ws_col: child_width,
-                            ws_xpixel: 0,
-                            ws_ypixel: 0,
-                        };
+                        let base = rect.cols / n;
+                        let mut x = rect.x;
+                        for (i, child) in children.iter().enumerate() {
+                            let last = i as u16 == n - 1;
+                            let cols = if last { rect.x + rect.cols - x } else { base };
+                            child.layout(PaneRect { x, y: rect.y, cols, rows: rect.rows }, out);
+                            x += cols;
+                        }
                     }
                     SplitDirection::SPLIT_NONE => {
-                        // No split, so just resize the single child to the full size.
-                        children_ws = ws;
+                        for child in children {
+                            child.layout(rect, out);
+                        }
                     }
-                }
-                for child in children {
-                    child.layout(children_ws, out);
                 }
             }
         }
     }
 
-    /// Recursively find the leaf node with the given pane_id and replace it with a split node containing the old pane and a new pane.
-    fn split_node_with_pane_id(&mut self, pane_id: PaneId, new_pane_id: PaneId, dir: SplitDirection) -> Result<(), Box<dyn std::error::Error>> {
+    /// Recursively find the leaf with `pane_id` and replace it with a split of the old
+    /// pane plus a new one.
+    fn split_node_with_pane_id(
+        &mut self,
+        pane_id: PaneId,
+        new_pane_id: PaneId,
+        dir: SplitDirection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
             PaneTreeNode::Leaf(id) => {
                 if *id == pane_id {
-                    // Replace this leaf with a split node containing the old pane and a new pane.
                     *self = PaneTreeNode::Split {
                         dir,
-                        children: vec![
-                            PaneTreeNode::Leaf(*id),
-                            PaneTreeNode::Leaf(new_pane_id),
-                        ],
+                        children: vec![PaneTreeNode::Leaf(*id), PaneTreeNode::Leaf(new_pane_id)],
                     };
                     Ok(())
                 } else {
@@ -85,11 +90,41 @@ impl PaneTreeNode {
             }
             PaneTreeNode::Split { dir: _, children } => {
                 for child in children {
-                    if let Ok(_) = child.split_node_with_pane_id(pane_id, new_pane_id, dir.clone()) {
+                    if child
+                        .split_node_with_pane_id(pane_id, new_pane_id, dir)
+                        .is_ok()
+                    {
                         return Ok(());
                     }
                 }
                 Err("Pane ID not found in tree".into())
+            }
+        }
+    }
+
+    /// Remove the leaf holding `pane_id` from this subtree, collapsing any split that's
+    /// left with a single child into that child. Returns `true` if *this* node itself is
+    /// the target leaf (so the caller removes it from its own children).
+    fn remove_pane(&mut self, pane_id: PaneId) -> bool {
+        match self {
+            PaneTreeNode::Leaf(id) => *id == pane_id,
+            PaneTreeNode::Split { children, .. } => {
+                // Recurse; a child that IS the target leaf reports true so we drop it.
+                let mut remove_idx = None;
+                for (i, child) in children.iter_mut().enumerate() {
+                    if child.remove_pane(pane_id) {
+                        remove_idx = Some(i);
+                        break;
+                    }
+                }
+                if let Some(i) = remove_idx {
+                    children.remove(i);
+                }
+                // Collapse: a split with one child becomes that child (pulls the subtree up).
+                if children.len() == 1 {
+                    *self = children.remove(0);
+                }
+                false
             }
         }
     }
@@ -100,19 +135,20 @@ pub struct WindowHandle {
     pane_tree_root: PaneTreeNode,
     pane_id_counter: PaneId,
     focused_pane_id: PaneId,
-    current_ws: Winsize,   // last size we were told to be
+    // The whole window's rectangle — the root area the tree is laid out within.
+    current_rect: PaneRect,
 }
 
 impl WindowHandle {
     pub fn new(ws: Winsize) -> Result<Self, Box<dyn std::error::Error>> {
-        let init_pane = PaneHandle::new(ws)?;
-        let pane_tree_root = PaneTreeNode::Leaf(0);
+        let rect = window_rect(ws);
+        let init_pane = PaneHandle::new(rect)?;
         Ok(Self {
             panes: HashMap::from([(0, init_pane)]),
-            pane_tree_root,
+            pane_tree_root: PaneTreeNode::Leaf(0),
             pane_id_counter: 1,
             focused_pane_id: 0,
-            current_ws: ws,
+            current_rect: rect,
         })
     }
 
@@ -143,40 +179,62 @@ impl WindowHandle {
             .pump()
     }
 
-    /// Resize all panes to match the new terminal size while conforming to the pane tree layout.
+    /// Resize the window to the new terminal size, re-laying out all panes.
     pub fn resize(&mut self, ws: Winsize) -> Result<(), Box<dyn std::error::Error>> {
-        let out = &mut Vec::new();
-        self.pane_tree_root.layout(ws, out);
-        for (pane_id, pane_ws) in out {
+        self.current_rect = window_rect(ws);
+        self.relayout()
+    }
+
+    /// Recompute every pane's rectangle from the tree and apply it. Call after any
+    /// change to size or tree structure (resize, split, close).
+    fn relayout(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut out = Vec::new();
+        self.pane_tree_root.layout(self.current_rect, &mut out);
+        for (pane_id, rect) in out {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
-                pane.resize(pane_ws.to_owned())?;
+                pane.resize(rect)?;
             }
         }
         Ok(())
     }
 
-    /// Ask all panes to render their state into a frame, then composite them into a single frame according to the pane tree layout.
+    /// Render every pane into its screen rect, composite them, and place the single real
+    /// cursor at the focused pane's cursor.
     pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Build a map of pane_id -> frame for all panes
         let mut pane_frames: HashMap<PaneId, String> = HashMap::new();
+        let mut focused_cursor: Option<PaneCursor> = None;
         for (pane_id, pane) in &mut self.panes {
-            pane_frames.insert(*pane_id, pane.render()?);
+            let rendered = pane.render()?;
+            if *pane_id == self.focused_pane_id {
+                focused_cursor = rendered.cursor;
+            }
+            pane_frames.insert(*pane_id, rendered.frame);
         }
 
-        // Composite into a single frame according to the pane tree layout
         let mut frame = String::new();
+        frame.push_str("\x1b[?25l"); // hide the cursor once while we redraw everything
         self.composite_pane_tree(&self.pane_tree_root, &pane_frames, &mut frame)?;
 
-        // Render to stdout
+        // One real cursor: place + reveal it only for the focused pane.
+        if let Some(c) = focused_cursor {
+            use std::fmt::Write as _;
+            write!(
+                frame,
+                "\x1b[{} q\x1b[{};{}H\x1b[?25h",
+                c.shape, c.screen_y, c.screen_x
+            )?;
+        }
+
         // One write for the whole frame, instead of a syscall per line.
         let mut out = std::io::stdout().lock();
         out.write_all(frame.as_bytes())?;
         out.flush()?;
-
         Ok(())
     }
 
-    /// Recursively composite the frames of panes according to the pane tree layout.
+    /// Recursively concatenate pane frames. Order doesn't matter — each pane's bytes are
+    /// absolutely positioned at its own rect.
     fn composite_pane_tree(
         &self,
         node: &PaneTreeNode,
@@ -198,31 +256,52 @@ impl WindowHandle {
         Ok(())
     }
 
-    /// Remove a pane. Returns how many panes remain.
-    pub fn close_pane(&mut self, pane: usize) -> usize {
+    /// Remove a pane: drop it from the arena AND the tree (collapsing its split), move
+    /// focus off it if needed, and relayout so survivors reclaim the space. Returns how
+    /// many panes remain.
+    pub fn close_pane(&mut self, pane: usize) -> Result<usize, Box<dyn std::error::Error>> {
         self.panes.remove(&pane);
-        self.focused_pane_id = self.focused_pane_id.min(self.panes.len().saturating_sub(1));
-        self.panes.len()
+        self.pane_tree_root.remove_pane(pane);
+
+        // If the closed pane was focused, hand focus to some survivor.
+        // (Picking the "neighbor" is a refinement for when focus navigation exists.)
+        if self.focused_pane_id == pane {
+            if let Some(&id) = self.panes.keys().next() {
+                self.focused_pane_id = id;
+            }
+        }
+
+        // Survivors grow into the freed space and repaint over the stale region.
+        if !self.panes.is_empty() {
+            self.relayout()?;
+        }
+        Ok(self.panes.len())
     }
 
-    /// Split the focused PaneTreeNode in the given direction.
+    /// Split the focused pane in the given direction, spawning a new pane.
     pub fn split_focused(&mut self, dir: SplitDirection) -> Result<(), Box<dyn std::error::Error>> {
         let new_pane_id = self.pane_id_counter;
         self.pane_id_counter += 1;
 
-        let new_pane = PaneHandle::new(self.current_ws)?;   // current_ws is just used to create
+        // Born at the window size (any valid, non-zero size); relayout fixes it below.
+        let new_pane = PaneHandle::new(self.current_rect)?;
         self.panes.insert(new_pane_id, new_pane);
 
-        // Update the pane tree to include the new pane
         self.pane_tree_root
             .split_node_with_pane_id(self.focused_pane_id, new_pane_id, dir)?;
-
-        // Focus the new pane
         self.focused_pane_id = new_pane_id;
 
-        // resize
-        self.resize(self.current_ws)?;   // recompute each pane's rectangle now that the tree has been updated
+        // Tree changed -> recompute all rectangles.
+        self.relayout()
+    }
+}
 
-        Ok(())
+/// The whole terminal as a rectangle at the origin (Winsize -> screen PaneRect).
+fn window_rect(ws: Winsize) -> PaneRect {
+    PaneRect {
+        x: 0,
+        y: 0,
+        cols: ws.ws_col,
+        rows: ws.ws_row,
     }
 }
