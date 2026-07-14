@@ -49,7 +49,7 @@ impl Mux {
 
     /// Compose the visible frame.
     /// (Focused pane full-screen for now; tiling multiple panes by layout is a later step.)
-    pub fn render(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.panes[self.focused].render()
     }
 

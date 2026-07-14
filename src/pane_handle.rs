@@ -5,7 +5,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
 use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, RowIterator};
 use libghostty_vt::screen::CellWide;
-use libghostty_vt::style::Underline;
+use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::unistd::execvp;
@@ -15,6 +15,12 @@ nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 pub struct PaneHandle {
     master: File,
     term: Terminal<'static, 'static>,
+    // Reused across frames instead of re-allocated every render.
+    render: RenderState<'static>,
+    rows: RowIterator<'static>,
+    cells: CellIterator<'static>,
+    // Reused output buffer: the whole frame is built here, then written in one syscall.
+    frame: String,
 }
 
 impl PaneHandle {
@@ -32,9 +38,17 @@ impl PaneHandle {
                     rows: ws.ws_row,
                     max_scrollback: 10_000,
                 })?;
+                let master = File::from(master);
+                // Non-blocking master so `pump` can drain the whole burst in one call
+                // (read until EAGAIN) instead of one chunk per poll wakeup.
+                set_nonblocking(&master)?;
                 Ok(Self {
-                    master: File::from(master),
+                    master,
                     term,
+                    render: RenderState::new()?,
+                    rows: RowIterator::new()?,
+                    cells: CellIterator::new()?,
+                    frame: String::new(),
                 })
             }
         }
@@ -50,17 +64,18 @@ impl PaneHandle {
         self.master.write_all(data)
     }
 
-    /// shell -> emulator. Returns `false` when the shell has exited (EOF).
+    /// shell -> emulator. Drains ALL currently-available output (until it would block)
+    /// so a burst becomes one render, not one render per 4 KB. Returns `false` on EOF.
     pub fn pump(&mut self) -> std::io::Result<bool> {
-        let mut buf = [0u8; 4096];
-        match self.master.read(&mut buf) {
-            Ok(0) => Ok(false),
-            Ok(n) => {
-                self.term.vt_write(&buf[..n]);
-                Ok(true)
+        let mut buf = [0u8; 8192];
+        loop {
+            match self.master.read(&mut buf) {
+                Ok(0) => return Ok(false),                                    // shell exited
+                Ok(n) => self.term.vt_write(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(true), // drained
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(true),
-            Err(e) => Err(e),
         }
     }
 
@@ -73,32 +88,30 @@ impl PaneHandle {
     }
 
     /// snapshot + iterate the grid to build the composited frame
-    pub fn render(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut render = RenderState::new()?;
-        let mut rows = RowIterator::new()?;
-        let mut cells = CellIterator::new()?;
+    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        use std::fmt::Write as _;
 
-        let mut out = std::io::stdout().lock();
-        // Hide the cursor while we redraw (so it doesn't skitter across the frame),
-        // home, and reset the pen.
-        write!(out, "\x1b[?25l\x1b[H\x1b[0m")?;
+        let snap = self.render.update(&self.term)?;
 
-        let snap = render.update(&self.term)?;
-        let mut row_iter = rows.update(&snap)?;
+        let frame = &mut self.frame;
+        frame.clear();
+        // Hide the cursor while we redraw, home, and reset the pen.
+        frame.push_str("\x1b[?25l\x1b[H\x1b[0m");
+
+        let mut row_iter = self.rows.update(&snap)?;
         let mut first = true;
         while let Some(row) = row_iter.next() {
             // Newline BETWEEN rows, not after the last one — a trailing \r\n on the
             // bottom line scrolls the whole terminal up and eats the top row.
             if !first {
-                write!(out, "\r\n")?;
+                frame.push_str("\r\n");
             }
             first = false;
 
-            // Each row starts with the pen reset (we emit \x1b[0m at row end), so the
-            // terminal's current pen matches this string. We only re-emit on change.
-            let mut last_pen = String::from("\x1b[0m");
+            // Terminal pen is reset at each row start (we emit \x1b[0m at row end).
+            let mut last_pen = Pen::DEFAULT;
 
-            let mut cell_iter = cells.update(row)?;
+            let mut cell_iter = self.cells.update(row)?;
             while let Some(cell) = cell_iter.next() {
                 // Width: a wide glyph occupies 2 columns — render the head, skip the
                 // spacer that follows it, or everything shifts right.
@@ -107,23 +120,23 @@ impl PaneHandle {
                     CellWide::Narrow | CellWide::Wide => {}
                 }
 
-                // Color/attributes: emit the SGR pen only when it changes cell-to-cell.
-                let pen = cell_sgr(&cell)?;
+                // Emit the SGR pen only when it changes cell-to-cell (no allocation to compare).
+                let pen = Pen::of(&cell)?;
                 if pen != last_pen {
-                    write!(out, "{pen}")?;
+                    pen.write_sgr(frame);
                     last_pen = pen;
                 }
 
-                let graphemes: String = cell.graphemes()?.into_iter().collect();
+                let graphemes = cell.graphemes()?;
                 if graphemes.is_empty() {
-                    write!(out, " ")?; // blank cell — a space keeps columns aligned
+                    frame.push(' '); // blank cell — a space keeps columns aligned
                 } else {
-                    write!(out, "{graphemes}")?;
+                    frame.extend(graphemes);
                 }
             }
-            write!(out, "\x1b[0m\x1b[K")?; // reset pen, then clear to EOL in the default bg
+            frame.push_str("\x1b[0m\x1b[K"); // reset pen, then clear to EOL in the default bg
         }
-        write!(out, "\x1b[0m\x1b[J")?; // reset, then clear any rows below the grid
+        frame.push_str("\x1b[0m\x1b[J"); // reset, then clear any rows below the grid
 
         // Reflect the emulator's logical cursor onto the REAL cursor: set its shape,
         // move it to the app's cursor cell (1-based), and reveal it. If the app hid its
@@ -143,46 +156,100 @@ impl PaneHandle {
                 }
                 _ => 2, // non_exhaustive fallback: steady block
             };
-            write!(out, "\x1b[{shape} q\x1b[{};{}H\x1b[?25h", cur.y + 1, cur.x + 1)?;
+            write!(frame, "\x1b[{shape} q\x1b[{};{}H\x1b[?25h", cur.y + 1, cur.x + 1)?;
         }
 
+        // One write for the whole frame, instead of a syscall per line.
+        let mut out = std::io::stdout().lock();
+        out.write_all(frame.as_bytes())?;
         out.flush()?;
         Ok(())
     }
 }
 
-/// Build the SGR ("Select Graphic Rendition") escape for a cell: a full pen that
-/// resets first (`0`) then applies this cell's attributes and truecolor fg/bg.
-fn cell_sgr(cell: &CellIteration) -> Result<String, Box<dyn std::error::Error>> {
-    let style = cell.style()?;
-    let mut codes = String::from("0"); // reset base, so each pen is self-contained
+fn set_nonblocking(fd: &impl AsRawFd) -> std::io::Result<()> {
+    let raw = fd.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(raw, libc::F_GETFL);
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
 
-    if style.bold {
-        codes.push_str(";1");
-    }
-    if style.faint {
-        codes.push_str(";2");
-    }
-    if style.italic {
-        codes.push_str(";3");
-    }
-    if !matches!(style.underline, Underline::None) {
-        codes.push_str(";4");
-    }
-    if style.inverse {
-        codes.push_str(";7"); // let the outer terminal do the fg/bg swap
-    }
-    if style.strikethrough {
-        codes.push_str(";9");
+/// A cell's visual "pen": colors + attributes. Cheap to build and compare (no
+/// allocation), so we only emit an SGR escape when it actually changes.
+#[derive(Clone, Copy, PartialEq)]
+struct Pen {
+    fg: Option<RgbColor>,
+    bg: Option<RgbColor>,
+    bold: bool,
+    faint: bool,
+    italic: bool,
+    underline: bool,
+    inverse: bool,
+    strike: bool,
+}
+
+impl Pen {
+    /// The reset state — matches the terminal right after `\x1b[0m`.
+    const DEFAULT: Pen = Pen {
+        fg: None,
+        bg: None,
+        bold: false,
+        faint: false,
+        italic: false,
+        underline: false,
+        inverse: false,
+        strike: false,
+    };
+
+    fn of(cell: &CellIteration) -> Result<Pen, Box<dyn std::error::Error>> {
+        let s = cell.style()?;
+        Ok(Pen {
+            fg: cell.fg_color()?,
+            bg: cell.bg_color()?,
+            bold: s.bold,
+            faint: s.faint,
+            italic: s.italic,
+            underline: !matches!(s.underline, Underline::None),
+            inverse: s.inverse,
+            strike: s.strikethrough,
+        })
     }
 
-    // None == "use the terminal default", so we simply omit the color code.
-    if let Some(c) = cell.fg_color()? {
-        codes.push_str(&format!(";38;2;{};{};{}", c.r, c.g, c.b));
+    /// Write a self-contained SGR: reset (`0`) then this pen's attributes + truecolor.
+    fn write_sgr(&self, frame: &mut String) {
+        use std::fmt::Write as _;
+        frame.push_str("\x1b[0");
+        if self.bold {
+            frame.push_str(";1");
+        }
+        if self.faint {
+            frame.push_str(";2");
+        }
+        if self.italic {
+            frame.push_str(";3");
+        }
+        if self.underline {
+            frame.push_str(";4");
+        }
+        if self.inverse {
+            frame.push_str(";7"); // let the outer terminal do the fg/bg swap
+        }
+        if self.strike {
+            frame.push_str(";9");
+        }
+        if let Some(c) = self.fg {
+            let _ = write!(frame, ";38;2;{};{};{}", c.r, c.g, c.b);
+        }
+        if let Some(c) = self.bg {
+            let _ = write!(frame, ";48;2;{};{};{}", c.r, c.g, c.b);
+        }
+        frame.push('m');
     }
-    if let Some(c) = cell.bg_color()? {
-        codes.push_str(&format!(";48;2;{};{};{}", c.r, c.g, c.b));
-    }
-
-    Ok(format!("\x1b[{codes}m"))
 }
