@@ -10,6 +10,8 @@ enum InputState {
 
 pub enum WispCommand {
     SplitFocusedWindow(SplitDirection),
+    CreateNewWindow,
+    SwitchToWindow(usize),
 }
 
 pub struct CommandStateMachine {
@@ -40,8 +42,17 @@ impl CommandStateMachine {
                 InputState::Prefix => {
                     match b {
                         PREFIX => pass.push(PREFIX), // prefix,prefix -> send a literal Ctrl-b
-                        b'h' => commands.push(WispCommand::SplitFocusedWindow(SplitDirection::SplitHorizontal)),
-                        b'v' => commands.push(WispCommand::SplitFocusedWindow(SplitDirection::SplitVertical)),
+                        b'd' => commands.push(WispCommand::SplitFocusedWindow(
+                            SplitDirection::SplitHorizontal,
+                        )),
+                        b'r' => commands.push(WispCommand::SplitFocusedWindow(
+                            SplitDirection::SplitVertical,
+                        )),
+                        b'c' => commands.push(WispCommand::CreateNewWindow),
+                        b'0'..=b'9' => {
+                            let window_index = (b - b'0') as usize;
+                            commands.push(WispCommand::SwitchToWindow(window_index));
+                        }
                         _ => {} // unknown command -> swallow
                     }
                     self.state = InputState::Normal;

@@ -8,3 +8,23 @@ pub struct PaneRect {
     pub cols: u16,
     pub rows: u16,
 }
+
+impl PaneRect {
+    pub fn from_winsize(ws: &nix::pty::Winsize) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            cols: ws.ws_col,
+            rows: ws.ws_row,
+        }
+    }
+
+    pub fn to_winsize(&self) -> nix::pty::Winsize {
+        nix::pty::Winsize {
+            ws_row: self.rows,
+            ws_col: self.cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }
+    }
+}

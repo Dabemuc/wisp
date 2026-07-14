@@ -22,9 +22,9 @@ impl Mux {
     pub fn new(ws: Winsize) -> Result<Self, Box<dyn std::error::Error>> {
         let init_window = WindowHandle::new(ws)?;
         Ok(Self {
-            windows: HashMap::from([(0, init_window)]),
-            window_id_counter: 1,
-            focused_window_id: 0,
+            windows: HashMap::from([(1, init_window)]),
+            window_id_counter: 2,
+            focused_window_id: 1,
             command_state: CommandStateMachine::new(),
         })
     }
@@ -49,8 +49,27 @@ impl Mux {
             match command {
                 WispCommand::SplitFocusedWindow(dir) => {
                     let window = self.focused_window_mut()?;
-                    window.split_focused(dir)?;   // tree mutation + new pane, below
-                    window.render()?;     // geometry changed -> redraw now
+                    window.split_focused(dir)?; // tree mutation + new pane, below
+                    window.render()?; // geometry changed -> redraw now
+                }
+                WispCommand::CreateNewWindow => {
+                    let new_window = WindowHandle::new(
+                        self.windows[&self.focused_window_id]
+                            .get_rect()
+                            .to_winsize(),
+                    )?;
+                    let new_window_id = self.window_id_counter;
+                    self.windows.insert(new_window_id, new_window);
+                    self.window_id_counter += 1;
+                    self.focused_window_id = new_window_id;
+                    self.windows.get_mut(&new_window_id).unwrap().render()?; // render the new window
+                }
+                WispCommand::SwitchToWindow(window_id) => {
+                    println!("Switching to window {}", window_id);
+                    if self.windows.contains_key(&window_id) {
+                        self.focused_window_id = window_id;
+                        self.windows.get_mut(&window_id).unwrap().render()?; // render the new focused window
+                    }
                 }
             }
         }

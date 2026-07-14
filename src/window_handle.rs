@@ -42,7 +42,15 @@ impl PaneTreeNode {
                         for (i, child) in children.iter().enumerate() {
                             let last = i as u16 == n - 1;
                             let rows = if last { rect.y + rect.rows - y } else { base };
-                            child.layout(PaneRect { x: rect.x, y, cols: rect.cols, rows }, out);
+                            child.layout(
+                                PaneRect {
+                                    x: rect.x,
+                                    y,
+                                    cols: rect.cols,
+                                    rows,
+                                },
+                                out,
+                            );
                             y += rows;
                         }
                     }
@@ -53,7 +61,15 @@ impl PaneTreeNode {
                         for (i, child) in children.iter().enumerate() {
                             let last = i as u16 == n - 1;
                             let cols = if last { rect.x + rect.cols - x } else { base };
-                            child.layout(PaneRect { x, y: rect.y, cols, rows: rect.rows }, out);
+                            child.layout(
+                                PaneRect {
+                                    x,
+                                    y: rect.y,
+                                    cols,
+                                    rows: rect.rows,
+                                },
+                                out,
+                            );
                             x += cols;
                         }
                     }
@@ -135,7 +151,7 @@ pub struct WindowHandle {
 
 impl WindowHandle {
     pub fn new(ws: Winsize) -> Result<Self, Box<dyn std::error::Error>> {
-        let rect = window_rect(ws);
+        let rect = PaneRect::from_winsize(&ws);
         let init_pane = PaneHandle::new(rect)?;
         Ok(Self {
             panes: HashMap::from([(0, init_pane)]),
@@ -175,7 +191,7 @@ impl WindowHandle {
 
     /// Resize the window to the new terminal size, re-laying out all panes.
     pub fn resize(&mut self, ws: Winsize) -> Result<(), Box<dyn std::error::Error>> {
-        self.current_rect = window_rect(ws);
+        self.current_rect = PaneRect::from_winsize(&ws);
         self.relayout()
     }
 
@@ -288,14 +304,9 @@ impl WindowHandle {
         // Tree changed -> recompute all rectangles.
         self.relayout()
     }
-}
 
-/// The whole terminal as a rectangle at the origin (Winsize -> screen PaneRect).
-fn window_rect(ws: Winsize) -> PaneRect {
-    PaneRect {
-        x: 0,
-        y: 0,
-        cols: ws.ws_col,
-        rows: ws.ws_row,
+    /// Return the window's rectangle (the root area the tree is laid out within).
+    pub fn get_rect(&self) -> PaneRect {
+        self.current_rect
     }
 }

@@ -176,13 +176,25 @@ impl PaneHandle {
             let blink = snap.cursor_blinking()?;
             let shape = match snap.cursor_visual_style()? {
                 CursorVisualStyle::Block | CursorVisualStyle::BlockHollow => {
-                    if blink { 1 } else { 2 }
+                    if blink {
+                        1
+                    } else {
+                        2
+                    }
                 }
                 CursorVisualStyle::Underline => {
-                    if blink { 3 } else { 4 }
+                    if blink {
+                        3
+                    } else {
+                        4
+                    }
                 }
                 CursorVisualStyle::Bar => {
-                    if blink { 5 } else { 6 }
+                    if blink {
+                        5
+                    } else {
+                        6
+                    }
                 }
                 _ => 2, // non_exhaustive fallback: steady block
             };
