@@ -1,4 +1,4 @@
-use crate::window_handle::SplitDirection;
+use crate::window_handle::{FocusDirection, SplitDirection};
 
 const PREFIX: u8 = 0x02; // Ctrl-b
 
@@ -12,6 +12,7 @@ pub enum WispCommand {
     SplitFocusedWindow(SplitDirection),
     CreateNewWindow,
     SwitchToWindow(usize),
+    FocusPane(FocusDirection),
 }
 
 pub struct CommandStateMachine {
@@ -49,6 +50,10 @@ impl CommandStateMachine {
                             SplitDirection::SplitVertical,
                         )),
                         b'c' => commands.push(WispCommand::CreateNewWindow),
+                        b'h' => commands.push(WispCommand::FocusPane(FocusDirection::Left)),
+                        b'j' => commands.push(WispCommand::FocusPane(FocusDirection::Down)),
+                        b'k' => commands.push(WispCommand::FocusPane(FocusDirection::Up)),
+                        b'l' => commands.push(WispCommand::FocusPane(FocusDirection::Right)),
                         b'0'..=b'9' => {
                             let window_index = (b - b'0') as usize;
                             commands.push(WispCommand::SwitchToWindow(window_index));

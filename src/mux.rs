@@ -83,6 +83,10 @@ impl Mux {
                         self.render()? // rerender everything
                     }
                 }
+                WispCommand::FocusPane(dir) => {
+                    self.focused_window_mut()?.focus_pane(dir);
+                    self.render()?; // cursor moves to the newly focused pane
+                }
             }
         }
 

@@ -14,6 +14,14 @@ pub enum SplitDirection {
     SplitVertical,
 }
 
+#[derive(Clone, Copy)]
+pub enum FocusDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 type PaneId = usize;
 
 struct Border {
@@ -177,6 +185,8 @@ pub struct WindowHandle {
     current_rect: PaneRect,
     // Divider segments from the last layout pass, painted every render.
     borders: Vec<Border>,
+    // Each pane's screen rectangle from the last layout — used for spatial focus nav.
+    pane_rects: HashMap<PaneId, PaneRect>,
 }
 
 impl WindowHandle {
@@ -189,6 +199,7 @@ impl WindowHandle {
             focused_pane_id: 0,
             current_rect: rect,
             borders: Vec::new(),
+            pane_rects: HashMap::from([(0, rect)]),
         })
     }
 
@@ -232,13 +243,14 @@ impl WindowHandle {
         let mut out_borders = Vec::new();
         self.pane_tree_root
             .layout(self.current_rect, &mut out_panes, &mut out_borders);
+        // Stash the pane rects (focus nav) and dividers (render) — layout isn't recomputed elsewhere.
+        self.pane_rects = out_panes.iter().copied().collect();
+        self.borders = out_borders;
         for (pane_id, rect) in out_panes {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
                 pane.resize(rect)?;
             }
         }
-        // Stash the dividers so render() can paint them (it doesn't recompute layout).
-        self.borders = out_borders;
         Ok(())
     }
 
@@ -321,15 +333,25 @@ impl WindowHandle {
     /// focus off it if needed, and relayout so survivors reclaim the space. Returns how
     /// many panes remain.
     pub fn close_pane(&mut self, pane: usize) -> Result<usize, Box<dyn std::error::Error>> {
+        // If we're closing the focused pane, pick its spatial neighbor NOW — while its
+        // rect is still in pane_rects — trying each direction in turn.
+        let new_focus = if self.focused_pane_id == pane {
+            self.neighbor(FocusDirection::Left)
+                .or_else(|| self.neighbor(FocusDirection::Right))
+                .or_else(|| self.neighbor(FocusDirection::Up))
+                .or_else(|| self.neighbor(FocusDirection::Down))
+        } else {
+            None
+        };
+
         self.panes.remove(&pane);
         self.pane_tree_root.remove_pane(pane);
 
-        // If the closed pane was focused, hand focus to some survivor.
-        // (Picking the "neighbor" is a refinement for when focus navigation exists.)
         if self.focused_pane_id == pane {
-            if let Some(&id) = self.panes.keys().next() {
-                self.focused_pane_id = id;
-            }
+            // Prefer the spatial neighbor; fall back to any survivor.
+            self.focused_pane_id = new_focus
+                .or_else(|| self.panes.keys().next().copied())
+                .unwrap_or(0);
         }
 
         // Survivors grow into the freed space and repaint over the stale region.
@@ -337,6 +359,58 @@ impl WindowHandle {
             self.relayout()?;
         }
         Ok(self.panes.len())
+    }
+
+    /// Move focus to the pane adjacent to the focused one in `dir` (if any).
+    pub fn focus_pane(&mut self, dir: FocusDirection) {
+        if let Some(id) = self.neighbor(dir) {
+            self.focused_pane_id = id;
+        }
+    }
+
+    /// Spatially find the nearest pane on the `dir` side of the focused pane that also
+    /// overlaps it on the perpendicular axis. Nearest edge wins; ties break on overlap.
+    fn neighbor(&self, dir: FocusDirection) -> Option<PaneId> {
+        let f = *self.pane_rects.get(&self.focused_pane_id)?;
+        let mut best: Option<(PaneId, u16, u16)> = None; // (id, distance, overlap)
+
+        for (&id, &p) in &self.pane_rects {
+            if id == self.focused_pane_id {
+                continue;
+            }
+            let (on_side, distance, overlap) = match dir {
+                FocusDirection::Left => (
+                    p.x + p.cols <= f.x,
+                    f.x.saturating_sub(p.x + p.cols),
+                    overlap_1d(f.y, f.rows, p.y, p.rows),
+                ),
+                FocusDirection::Right => (
+                    p.x >= f.x + f.cols,
+                    p.x.saturating_sub(f.x + f.cols),
+                    overlap_1d(f.y, f.rows, p.y, p.rows),
+                ),
+                FocusDirection::Up => (
+                    p.y + p.rows <= f.y,
+                    f.y.saturating_sub(p.y + p.rows),
+                    overlap_1d(f.x, f.cols, p.x, p.cols),
+                ),
+                FocusDirection::Down => (
+                    p.y >= f.y + f.rows,
+                    p.y.saturating_sub(f.y + f.rows),
+                    overlap_1d(f.x, f.cols, p.x, p.cols),
+                ),
+            };
+            if on_side && overlap > 0 {
+                let better = match best {
+                    None => true,
+                    Some((_, bd, bo)) => distance < bd || (distance == bd && overlap > bo),
+                };
+                if better {
+                    best = Some((id, distance, overlap));
+                }
+            }
+        }
+        best.map(|(id, _, _)| id)
     }
 
     /// Split the focused pane in the given direction, spawning a new pane.
@@ -355,6 +429,13 @@ impl WindowHandle {
         // Tree changed -> recompute all rectangles.
         self.relayout()
     }
+}
+
+/// Length of overlap between two 1D ranges [a, a+alen) and [b, b+blen).
+fn overlap_1d(a: u16, alen: u16, b: u16, blen: u16) -> u16 {
+    let start = a.max(b);
+    let end = (a + alen).min(b + blen);
+    end.saturating_sub(start)
 }
 
 /// Pick the box-drawing glyph for a border cell from which of its 4 neighbors are also
