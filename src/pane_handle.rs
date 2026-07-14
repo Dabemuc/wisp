@@ -1,12 +1,14 @@
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::unistd::execvp;
+
+nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 pub struct PaneHandle {
     master: File,
@@ -58,6 +60,14 @@ impl PaneHandle {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(true),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn resize(&mut self, ws: Winsize) -> Result<(), Box<dyn std::error::Error>> {
+        // 1) tell the kernel the pty's new size -> it SIGWINCHes bash/vim/…
+        unsafe { tiocswinsz(self.master.as_raw_fd(), &ws)? };
+        // 2) resize the emulator's grid to match (0,0 px: we're a text renderer)
+        self.term.resize(ws.ws_col, ws.ws_row, 0, 0)?;
+        Ok(())
     }
 
     pub fn render(&self) -> Result<(), Box<dyn std::error::Error>> {
