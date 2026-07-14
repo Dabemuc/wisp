@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use libghostty_vt::render::{CellIteration, CellIterator, RowIterator};
+use libghostty_vt::render::{CellIteration, CellIterator, CursorVisualStyle, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
@@ -125,11 +125,25 @@ impl PaneHandle {
         }
         write!(out, "\x1b[0m\x1b[J")?; // reset, then clear any rows below the grid
 
-        // Reflect the emulator's logical cursor onto the REAL cursor: move it to the
-        // app's cursor cell (1-based) and reveal it. If the app hid its cursor (or it
-        // scrolled off-viewport), cursor_viewport() is None and we leave it hidden.
+        // Reflect the emulator's logical cursor onto the REAL cursor: set its shape,
+        // move it to the app's cursor cell (1-based), and reveal it. If the app hid its
+        // cursor (or it scrolled off-viewport), cursor_viewport() is None -> stay hidden.
         if let Some(cur) = snap.cursor_viewport()? {
-            write!(out, "\x1b[{};{}H\x1b[?25h", cur.y + 1, cur.x + 1)?;
+            // DECSCUSR (CSI Ps SP q): odd codes blink, even are steady.
+            let blink = snap.cursor_blinking()?;
+            let shape = match snap.cursor_visual_style()? {
+                CursorVisualStyle::Block | CursorVisualStyle::BlockHollow => {
+                    if blink { 1 } else { 2 }
+                }
+                CursorVisualStyle::Underline => {
+                    if blink { 3 } else { 4 }
+                }
+                CursorVisualStyle::Bar => {
+                    if blink { 5 } else { 6 }
+                }
+                _ => 2, // non_exhaustive fallback: steady block
+            };
+            write!(out, "\x1b[{shape} q\x1b[{};{}H\x1b[?25h", cur.y + 1, cur.x + 1)?;
         }
 
         out.flush()?;
