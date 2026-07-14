@@ -8,6 +8,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::pty::Winsize;
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
+mod command_state_machine;
 mod mux;
 mod pane_handle;
 mod raw_mode_guard;

@@ -2,6 +2,7 @@ use std::{collections::HashMap, os::fd::BorrowedFd};
 
 use nix::pty::Winsize;
 
+use crate::command_state_machine::{CommandStateMachine, WispCommand};
 use crate::window_handle::WindowHandle;
 
 type WindowId = usize;
@@ -14,6 +15,7 @@ pub struct Mux {
     windows: HashMap<WindowId, WindowHandle>,
     window_id_counter: WindowId,
     focused_window_id: WindowId,
+    command_state: CommandStateMachine,
 }
 
 impl Mux {
@@ -23,6 +25,7 @@ impl Mux {
             windows: HashMap::from([(0, init_window)]),
             window_id_counter: 1,
             focused_window_id: 0,
+            command_state: CommandStateMachine::new(),
         })
     }
 
@@ -36,15 +39,41 @@ impl Mux {
     }
 
     /// Keyboard bytes -> the focused window.
-    /// (Later: a prefix-key state machine intercepts commands here instead of forwarding everything.)
-    pub fn handle_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    /// Also extract and handle mux commands (prefix + command byte).
+    pub fn handle_input(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        // Extract
+        let (commands, remaining_bytes) = self.command_state.parse_input(bytes);
+
+        // Handle commands
+        for command in commands {
+            match command {
+                WispCommand::SPLIT_FOCUSED_WINDOW(dir) => {
+                    let window = self.focused_window_mut()?;
+                    window.split_focused(dir)?;   // tree mutation + new pane, below
+                    window.render()?;     // geometry changed -> redraw now
+                }
+            }
+        }
+
+        // Forward remaining bytes to the focused window
         self.windows
             .get_mut(&self.focused_window_id)
             .ok_or(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "Focused window not found", // TODO: Fixed mux error types
+                "Focused window not found",
             ))?
-            .handle_input(bytes)
+            .handle_input(remaining_bytes.as_slice())?;
+
+        Ok(())
+    }
+
+    fn focused_window_mut(&mut self) -> std::io::Result<&mut WindowHandle> {
+        self.windows
+            .get_mut(&self.focused_window_id)
+            .ok_or(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Focused window not found",
+            ))
     }
 
     /// Drain the output of a pane the reactor flagged readable.

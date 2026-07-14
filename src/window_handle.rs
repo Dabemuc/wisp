@@ -4,7 +4,8 @@ use nix::pty::Winsize;
 
 use crate::pane_handle::PaneHandle;
 
-enum SplitDirection {
+#[derive(Clone, Copy)]
+pub enum SplitDirection {
     SPLIT_HORIZONTAL,
     SPLIT_VERTICAL,
     SPLIT_NONE,
@@ -63,6 +64,35 @@ impl PaneTreeNode {
             }
         }
     }
+
+    /// Recursively find the leaf node with the given pane_id and replace it with a split node containing the old pane and a new pane.
+    fn split_node_with_pane_id(&mut self, pane_id: PaneId, new_pane_id: PaneId, dir: SplitDirection) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            PaneTreeNode::Leaf(id) => {
+                if *id == pane_id {
+                    // Replace this leaf with a split node containing the old pane and a new pane.
+                    *self = PaneTreeNode::Split {
+                        dir,
+                        children: vec![
+                            PaneTreeNode::Leaf(*id),
+                            PaneTreeNode::Leaf(new_pane_id),
+                        ],
+                    };
+                    Ok(())
+                } else {
+                    Err("Pane ID not found in tree".into())
+                }
+            }
+            PaneTreeNode::Split { dir: _, children } => {
+                for child in children {
+                    if let Ok(_) = child.split_node_with_pane_id(pane_id, new_pane_id, dir.clone()) {
+                        return Ok(());
+                    }
+                }
+                Err("Pane ID not found in tree".into())
+            }
+        }
+    }
 }
 
 pub struct WindowHandle {
@@ -70,6 +100,7 @@ pub struct WindowHandle {
     pane_tree_root: PaneTreeNode,
     pane_id_counter: PaneId,
     focused_pane_id: PaneId,
+    current_ws: Winsize,   // last size we were told to be
 }
 
 impl WindowHandle {
@@ -81,6 +112,7 @@ impl WindowHandle {
             pane_tree_root,
             pane_id_counter: 1,
             focused_pane_id: 0,
+            current_ws: ws,
         })
     }
 
@@ -171,5 +203,26 @@ impl WindowHandle {
         self.panes.remove(&pane);
         self.focused_pane_id = self.focused_pane_id.min(self.panes.len().saturating_sub(1));
         self.panes.len()
+    }
+
+    /// Split the focused PaneTreeNode in the given direction.
+    pub fn split_focused(&mut self, dir: SplitDirection) -> Result<(), Box<dyn std::error::Error>> {
+        let new_pane_id = self.pane_id_counter;
+        self.pane_id_counter += 1;
+
+        let new_pane = PaneHandle::new(self.current_ws)?;   // current_ws is just used to create
+        self.panes.insert(new_pane_id, new_pane);
+
+        // Update the pane tree to include the new pane
+        self.pane_tree_root
+            .split_node_with_pane_id(self.focused_pane_id, new_pane_id, dir)?;
+
+        // Focus the new pane
+        self.focused_pane_id = new_pane_id;
+
+        // resize
+        self.resize(self.current_ws)?;   // recompute each pane's rectangle now that the tree has been updated
+
+        Ok(())
     }
 }
