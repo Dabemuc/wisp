@@ -47,7 +47,7 @@ impl Mux {
         // Handle commands
         for command in commands {
             match command {
-                WispCommand::SPLIT_FOCUSED_WINDOW(dir) => {
+                WispCommand::SplitFocusedWindow(dir) => {
                     let window = self.focused_window_mut()?;
                     window.split_focused(dir)?;   // tree mutation + new pane, below
                     window.render()?;     // geometry changed -> redraw now

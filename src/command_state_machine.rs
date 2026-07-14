@@ -9,7 +9,7 @@ enum InputState {
 }
 
 pub enum WispCommand {
-    SPLIT_FOCUSED_WINDOW(SplitDirection),
+    SplitFocusedWindow(SplitDirection),
 }
 
 pub struct CommandStateMachine {
@@ -40,8 +40,8 @@ impl CommandStateMachine {
                 InputState::Prefix => {
                     match b {
                         PREFIX => pass.push(PREFIX), // prefix,prefix -> send a literal Ctrl-b
-                        b'h' => commands.push(WispCommand::SPLIT_FOCUSED_WINDOW(SplitDirection::SPLIT_HORIZONTAL)),
-                        b'v' => commands.push(WispCommand::SPLIT_FOCUSED_WINDOW(SplitDirection::SPLIT_VERTICAL)),
+                        b'h' => commands.push(WispCommand::SplitFocusedWindow(SplitDirection::SplitHorizontal)),
+                        b'v' => commands.push(WispCommand::SplitFocusedWindow(SplitDirection::SplitVertical)),
                         _ => {} // unknown command -> swallow
                     }
                     self.state = InputState::Normal;

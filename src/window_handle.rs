@@ -7,9 +7,8 @@ use crate::pane_handle::{PaneCursor, PaneHandle};
 
 #[derive(Clone, Copy)]
 pub enum SplitDirection {
-    SPLIT_HORIZONTAL,
-    SPLIT_VERTICAL,
-    SPLIT_NONE,
+    SplitHorizontal,
+    SplitVertical,
 }
 
 type PaneId = usize;
@@ -37,7 +36,7 @@ impl PaneTreeNode {
                 }
                 match dir {
                     // Stacked: divide the rows, advance y down the screen.
-                    SplitDirection::SPLIT_HORIZONTAL => {
+                    SplitDirection::SplitHorizontal => {
                         let base = rect.rows / n;
                         let mut y = rect.y;
                         for (i, child) in children.iter().enumerate() {
@@ -48,7 +47,7 @@ impl PaneTreeNode {
                         }
                     }
                     // Side by side: divide the columns, advance x across the screen.
-                    SplitDirection::SPLIT_VERTICAL => {
+                    SplitDirection::SplitVertical => {
                         let base = rect.cols / n;
                         let mut x = rect.x;
                         for (i, child) in children.iter().enumerate() {
@@ -56,11 +55,6 @@ impl PaneTreeNode {
                             let cols = if last { rect.x + rect.cols - x } else { base };
                             child.layout(PaneRect { x, y: rect.y, cols, rows: rect.rows }, out);
                             x += cols;
-                        }
-                    }
-                    SplitDirection::SPLIT_NONE => {
-                        for child in children {
-                            child.layout(rect, out);
                         }
                     }
                 }
