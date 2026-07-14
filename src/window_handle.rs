@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::Write, os::fd::BorrowedFd};
+use std::{collections::HashMap, os::fd::BorrowedFd};
 
 use nix::pty::Winsize;
 
@@ -150,8 +150,7 @@ pub struct WindowHandle {
 }
 
 impl WindowHandle {
-    pub fn new(ws: Winsize) -> Result<Self, Box<dyn std::error::Error>> {
-        let rect = PaneRect::from_winsize(&ws);
+    pub fn new(rect: PaneRect) -> Result<Self, Box<dyn std::error::Error>> {
         let init_pane = PaneHandle::new(rect)?;
         Ok(Self {
             panes: HashMap::from([(0, init_pane)]),
@@ -210,7 +209,7 @@ impl WindowHandle {
 
     /// Render every pane into its screen rect, composite them, and place the single real
     /// cursor at the focused pane's cursor.
-    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn render(&mut self) -> Result<(String, Option<PaneCursor>), Box<dyn std::error::Error>> {
         // Build a map of pane_id -> frame for all panes
         let mut pane_frames: HashMap<PaneId, String> = HashMap::new();
         let mut focused_cursor: Option<PaneCursor> = None;
@@ -226,21 +225,7 @@ impl WindowHandle {
         frame.push_str("\x1b[?25l"); // hide the cursor once while we redraw everything
         self.composite_pane_tree(&self.pane_tree_root, &pane_frames, &mut frame)?;
 
-        // One real cursor: place + reveal it only for the focused pane.
-        if let Some(c) = focused_cursor {
-            use std::fmt::Write as _;
-            write!(
-                frame,
-                "\x1b[{} q\x1b[{};{}H\x1b[?25h",
-                c.shape, c.screen_y, c.screen_x
-            )?;
-        }
-
-        // One write for the whole frame, instead of a syscall per line.
-        let mut out = std::io::stdout().lock();
-        out.write_all(frame.as_bytes())?;
-        out.flush()?;
-        Ok(())
+        Ok((frame, focused_cursor))
     }
 
     /// Recursively concatenate pane frames. Order doesn't matter — each pane's bytes are
@@ -303,10 +288,5 @@ impl WindowHandle {
 
         // Tree changed -> recompute all rectangles.
         self.relayout()
-    }
-
-    /// Return the window's rectangle (the root area the tree is laid out within).
-    pub fn get_rect(&self) -> PaneRect {
-        self.current_rect
     }
 }

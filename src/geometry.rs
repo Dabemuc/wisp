@@ -19,7 +19,7 @@ impl PaneRect {
         }
     }
 
-    pub fn to_winsize(&self) -> nix::pty::Winsize {
+    pub fn _to_winsize(&self) -> nix::pty::Winsize {
         nix::pty::Winsize {
             ws_row: self.rows,
             ws_col: self.cols,
