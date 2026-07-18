@@ -1,4 +1,4 @@
-use crate::window_handle::{FocusDirection, SplitDirection};
+use super::window_handle::{FocusDirection, SplitDirection};
 
 const PREFIX: u8 = 0x02; // Ctrl-b
 

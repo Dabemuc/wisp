@@ -10,7 +10,7 @@ use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::unistd::execvp;
 
-use crate::geometry::PaneRect;
+use super::geometry::PaneRect;
 
 nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 

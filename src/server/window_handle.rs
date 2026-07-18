@@ -5,8 +5,8 @@ use std::{
 
 use nix::pty::Winsize;
 
-use crate::geometry::PaneRect;
-use crate::pane_handle::{PaneCursor, PaneHandle};
+use super::geometry::PaneRect;
+use super::pane_handle::{PaneCursor, PaneHandle};
 
 #[derive(Clone, Copy)]
 pub enum SplitDirection {

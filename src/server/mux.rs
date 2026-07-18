@@ -1,11 +1,10 @@
-use std::io::Write;
 use std::{collections::HashMap, os::fd::BorrowedFd};
 
 use nix::pty::Winsize;
 
-use crate::command_state_machine::{CommandStateMachine, WispCommand};
-use crate::geometry::PaneRect;
-use crate::window_handle::WindowHandle;
+use super::command_state_machine::{CommandStateMachine, WispCommand};
+use super::geometry::PaneRect;
+use super::window_handle::WindowHandle;
 
 type WindowId = usize;
 
@@ -58,9 +57,8 @@ impl Mux {
         for command in commands {
             match command {
                 WispCommand::SplitFocusedWindow(dir) => {
-                    let window = self.focused_window_mut()?;
-                    window.split_focused(dir)?; // tree mutation + new pane, below
-                    window.render()?; // geometry changed -> redraw now
+                    // Just mutate — the mux thread re-renders once after handling input.
+                    self.focused_window_mut()?.split_focused(dir)?;
                 }
                 WispCommand::CreateNewWindow => {
                     // tmux-style: take the smallest free id in 1..=9 (fills gaps left by
@@ -74,18 +72,15 @@ impl Mux {
                         })?;
                         self.windows.insert(new_window_id, new_window);
                         self.focused_window_id = new_window_id;
-                        self.render()?; // rerender everything
                     }
                 }
                 WispCommand::SwitchToWindow(window_id) => {
                     if self.windows.contains_key(&window_id) {
                         self.focused_window_id = window_id;
-                        self.render()? // rerender everything
                     }
                 }
                 WispCommand::FocusPane(dir) => {
                     self.focused_window_mut()?.focus_pane(dir);
-                    self.render()?; // cursor moves to the newly focused pane
                 }
             }
         }
@@ -140,8 +135,9 @@ impl Mux {
             .resize(ws)
     }
 
-    /// Ask focused window to render its panes into a composited frame, then draw that frame to the real terminal.
-    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Compose the focused window + top bar into one frame of bytes for the client.
+    /// (No stdout — the server ships this over the socket.)
+    pub fn render_frame(&mut self) -> Result<String, Box<dyn std::error::Error>> {
         // Render focused window
         let (mut frame, focused_cursor) = self
             .windows
@@ -165,12 +161,7 @@ impl Mux {
             )?;
         }
 
-        // One write for the whole frame
-        let mut out = std::io::stdout().lock();
-        out.write_all(frame.as_bytes())?;
-        out.flush()?;
-
-        Ok(())
+        Ok(frame)
     }
 
     /// Render the top bar with window IDs and highlight the focused window.
@@ -230,12 +221,6 @@ impl Mux {
                         .or_else(|| self.windows.keys().copied().min())
                         .unwrap_or(0);
                 }
-            }
-
-            // Only redraw if a window still exists — otherwise there's no focused
-            // window to render (we're about to quit) and render() would error.
-            if !self.windows.is_empty() {
-                self.render()?; // rerender everything
             }
         }
 
