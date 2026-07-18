@@ -10,6 +10,16 @@ type WindowId = usize;
 
 const MAX_WINDOWS: WindowId = 9;
 
+/// The region a window occupies: the whole terminal minus row 0, which is the top bar.
+fn content_rect(ws: Winsize) -> PaneRect {
+    PaneRect {
+        x: 0,
+        y: 1,
+        cols: ws.ws_col,
+        rows: ws.ws_row.saturating_sub(1),
+    }
+}
+
 /// Owns the windows and knows *what* they are, *which* is focused, and *where* input
 /// goes. It deliberately knows nothing about `poll`, signals, or reading fds — that
 /// OS-readiness plumbing lives in the reactor (main). The reactor only tells it
@@ -23,13 +33,7 @@ pub struct Mux {
 
 impl Mux {
     pub fn new(ws: Winsize) -> Result<Self, Box<dyn std::error::Error>> {
-        // Move window to row 1, leaving row 0 for the top bar.
-        let init_window = WindowHandle::new(PaneRect {
-            cols: ws.ws_col,
-            rows: ws.ws_row - 1,
-            x: 0,
-            y: 1,
-        })?;
+        let init_window = WindowHandle::new(content_rect(ws))?;
         Ok(Self {
             windows: HashMap::from([(1, init_window)]),
             focused_window_id: 1,
@@ -64,12 +68,7 @@ impl Mux {
                     // tmux-style: take the smallest free id in 1..=9 (fills gaps left by
                     // closed windows). If all 9 are taken, do nothing.
                     if let Some(new_window_id) = self.next_free_window_id() {
-                        let new_window = WindowHandle::new(PaneRect {
-                            cols: self.current_ws.ws_col,
-                            rows: self.current_ws.ws_row - 1,
-                            x: 0,
-                            y: 1,
-                        })?;
+                        let new_window = WindowHandle::new(content_rect(self.current_ws))?;
                         self.windows.insert(new_window_id, new_window);
                         self.focused_window_id = new_window_id;
                     }
@@ -123,16 +122,16 @@ impl Mux {
             .pump(pane_id)
     }
 
-    /// Resize focused window to match the new terminal size.
+    /// Resize ALL windows to the new terminal size (minus the top bar). Every window
+    /// needs the new size, not just the focused one, so switching to another window
+    /// after a resize shows it correctly sized.
     pub fn resize(&mut self, ws: Winsize) -> Result<(), Box<dyn std::error::Error>> {
         self.current_ws = ws;
-        self.windows
-            .get_mut(&self.focused_window_id)
-            .ok_or(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Focused window not found",
-            ))?
-            .resize(ws)
+        let rect = content_rect(ws);
+        for window in self.windows.values_mut() {
+            window.resize(rect)?;
+        }
+        Ok(())
     }
 
     /// Compose the focused window + top bar into one frame of bytes for the client.

@@ -3,8 +3,6 @@ use std::{
     os::fd::BorrowedFd,
 };
 
-use nix::pty::Winsize;
-
 use super::geometry::PaneRect;
 use super::pane::{PaneCursor, PaneHandle};
 
@@ -240,9 +238,10 @@ impl WindowHandle {
             .pump()
     }
 
-    /// Resize the window to the new terminal size, re-laying out all panes.
-    pub fn resize(&mut self, ws: Winsize) -> Result<(), Box<dyn std::error::Error>> {
-        self.current_rect = PaneRect::from_winsize(&ws);
+    /// Resize the window to occupy `rect` (its screen region), re-laying out all panes.
+    /// The caller (mux) decides the region — e.g. reserving row 0 for the top bar.
+    pub fn resize(&mut self, rect: PaneRect) -> Result<(), Box<dyn std::error::Error>> {
+        self.current_rect = rect;
         self.relayout()
     }
 
