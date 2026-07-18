@@ -4,7 +4,7 @@ use nix::pty::Winsize;
 
 use super::command_state_machine::{CommandStateMachine, WispCommand};
 use super::geometry::PaneRect;
-use super::window_handle::WindowHandle;
+use super::window::WindowHandle;
 
 type WindowId = usize;
 

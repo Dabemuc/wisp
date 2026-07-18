@@ -1,10 +1,10 @@
 mod command_state_machine;
 mod geometry;
 mod mux;
-mod pane_handle;
+mod pane;
 mod session;
 mod unix_server;
-mod window_handle;
+mod window;
 
 // Module exports
 pub use unix_server::UnixServer;
