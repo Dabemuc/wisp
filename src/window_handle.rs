@@ -68,7 +68,12 @@ impl PaneTreeNode {
                             // Last child absorbs the remainder so the area fills exactly.
                             let rows = if last { rect.y + rect.rows - y } else { base };
                             child.layout(
-                                PaneRect { x: rect.x, y, cols: rect.cols, rows },
+                                PaneRect {
+                                    x: rect.x,
+                                    y,
+                                    cols: rect.cols,
+                                    rows,
+                                },
                                 out_panes,
                                 out_borders,
                             );
@@ -93,7 +98,12 @@ impl PaneTreeNode {
                             let last = i as u16 == n - 1;
                             let cols = if last { rect.x + rect.cols - x } else { base };
                             child.layout(
-                                PaneRect { x, y: rect.y, cols, rows: rect.rows },
+                                PaneRect {
+                                    x,
+                                    y: rect.y,
+                                    cols,
+                                    rows: rect.rows,
+                                },
                                 out_panes,
                                 out_borders,
                             );
