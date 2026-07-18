@@ -11,6 +11,7 @@ pub struct UnixServer {
     listener: UnixListener,
     socket_file_path: String,
     session: SessionHandle,
+    shutdown: Arc<Notify>,
 }
 
 impl UnixServer {
@@ -23,29 +24,33 @@ impl UnixServer {
             UnixListener::bind(socket_file_path).expect("[SERVER] Failed to bind to socket");
         println!("[SERVER] Listening on {}", socket_file_path);
 
+        // Shared shutdown signal: fired by KillServer or when the session's last window
+        // exits. The accept loop selects on it.
+        let shutdown = Arc::new(Notify::new());
+
         // One session for now. Multi-session = a registry of these (Step 2).
-        let session = SessionHandle::spawn();
+        let session = SessionHandle::spawn(shutdown.clone());
 
         UnixServer {
             listener,
             socket_file_path: socket_file_path.to_owned(),
             session,
+            shutdown,
         }
     }
 
     /// Accept loop — never returns, so it keeps the process (and runtime) alive.
     pub async fn run(self) {
-        let shutdown = Arc::new(Notify::new());
         loop {
             tokio::select! {
                 accepted = self.listener.accept() => {
                     if let Ok((conn, _)) = accepted {
-                        let s = shutdown.clone();
+                        let s = self.shutdown.clone();
                         let session = self.session.clone();
                         tokio::spawn(async move { handle_connection(conn, s, session).await; });
                     }
                 }
-                _ = shutdown.notified() => break,
+                _ = self.shutdown.notified() => break,
             }
         }
         let _ = std::fs::remove_file(self.socket_file_path); // don't leave a stale socket

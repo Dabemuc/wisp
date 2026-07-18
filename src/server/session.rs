@@ -5,6 +5,7 @@ use std::sync::mpsc as std_mpsc;
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::pty::Winsize;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::mux::Mux;
@@ -35,8 +36,9 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     /// Spawn a new session: a dedicated thread that owns the !Send `Mux`, plus a
-    /// self-pipe to wake its poll(). Returns a handle to talk to it.
-    pub fn spawn() -> Self {
+    /// self-pipe to wake its poll(). `shutdown` is fired when the session's last window
+    /// exits. Returns a handle to talk to it.
+    pub fn spawn(shutdown: Arc<Notify>) -> Self {
         // Self-pipe used to wake the mux thread's poll() when a command arrives.
         let mut pipe_fds = [0i32; 2];
         if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
@@ -54,7 +56,7 @@ impl SessionHandle {
 
         // The Mux is BORN on this thread and never leaves it — that's what makes its
         // !Send contents legal. Only Send things (commands, senders, byte vecs) cross.
-        std::thread::spawn(move || run_session(cmd_rx, wake_r));
+        std::thread::spawn(move || run_session(cmd_rx, wake_r, shutdown));
 
         SessionHandle {
             cmd_tx,
@@ -76,7 +78,7 @@ impl SessionHandle {
 /// The session event loop. Owns the (!Send) `Mux` for the session's lifetime. This is the
 /// old single-process reactor, re-plumbed: "stdin" is the command channel (woken by the
 /// self-pipe), "stdout" is each attached client's frame channel.
-fn run_session(cmd_rx: std_mpsc::Receiver<SessionCmd>, wake_r: OwnedFd) {
+fn run_session(cmd_rx: std_mpsc::Receiver<SessionCmd>, wake_r: OwnedFd, shutdown: Arc<Notify>) {
     // Child shells must see a TERM matching what libghostty-vt emulates. Set it here,
     // before Mux::new forks any pane.
     unsafe { std::env::set_var("TERM", "xterm-256color") };
@@ -161,7 +163,14 @@ fn run_session(cmd_rx: std_mpsc::Receiver<SessionCmd>, wake_r: OwnedFd) {
             }
         }
         for (w, p) in exited.into_iter().rev() {
-            let _ = mux.close_pane(w, p);
+            // If that was the last window's last pane, the session is over: tell the
+            // server to shut down (dropping every client connection, so clients exit
+            // cleanly). Single-session behaviour — Step 2 will instead remove just this
+            // session from a registry and only shut down when none remain.
+            if let Ok(0) = mux.close_pane(w, p) {
+                shutdown.notify_one();
+                return;
+            }
             dirty = true;
         }
 
