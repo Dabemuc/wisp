@@ -10,7 +10,7 @@ pub struct PaneRect {
 }
 
 impl PaneRect {
-    pub fn from_winsize(ws: &nix::pty::Winsize) -> Self {
+    pub fn _from_winsize(ws: &nix::pty::Winsize) -> Self {
         Self {
             x: 0,
             y: 0,

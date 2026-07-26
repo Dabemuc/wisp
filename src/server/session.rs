@@ -175,11 +175,12 @@ fn run_session(cmd_rx: std_mpsc::Receiver<SessionCmd>, wake_r: OwnedFd, shutdown
         }
 
         // --- render once, broadcast to attached clients (dropping dead ones) ---
-        if dirty && !clients.is_empty() {
-            if let Ok(frame) = mux.render_frame() {
-                let bytes = frame.into_bytes();
-                clients.retain(|c| c.send(ServerMessage::Frame(bytes.clone())).is_ok());
-            }
+        if dirty
+            && !clients.is_empty()
+            && let Ok(frame) = mux.render_frame()
+        {
+            let bytes = frame.into_bytes();
+            clients.retain(|c| c.send(ServerMessage::Frame(bytes.clone())).is_ok());
         }
     }
 }
