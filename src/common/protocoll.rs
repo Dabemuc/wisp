@@ -20,7 +20,6 @@ pub enum ServerMessage {
     // control
     Sessions(Vec<String>),
     // data
-    Frame(Vec<u8>),
     FrameData(FrameDataDTO),
     Bell,
 }

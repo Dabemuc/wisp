@@ -73,12 +73,6 @@ impl UnixClient {
             let mut out = tokio::io::stdout();
             loop {
                 match read_msg::<_, ServerMessage>(&mut rd).await {
-                    Ok(ServerMessage::Frame(bytes)) => {
-                        if out.write_all(&bytes).await.is_err() {
-                            break;
-                        }
-                        let _ = out.flush().await;
-                    }
                     Ok(ServerMessage::FrameData(data)) => {
                         let mut ui_overlay = String::new();
 
