@@ -53,7 +53,9 @@ fn render_top_bar(ws: Winsize, mut window_ids: Vec<u16>, focused_window_id: u16)
     let mut top_bar = String::new();
     top_bar.push_str("\x1b[?25l"); // hide the cursor while we redraw everything
     top_bar.push_str("\x1b[H"); // move cursor to top-left
-    top_bar.push_str("\x1b[7m"); // reverse video for the top bar
+    // Reset to the default pen FIRST, then reverse — otherwise reverse video flips
+    // whatever colors the pane content (e.g. btop) left active, so the bar's color drifts.
+    top_bar.push_str("\x1b[0m\x1b[7m"); // default pen, then reverse video for the top bar
     top_bar.push_str(&visible);
     top_bar.push_str("\x1b[0m"); // reset attributes
     top_bar
