@@ -170,8 +170,11 @@ impl PaneHandle {
         }
 
         // Cursor in SCREEN coordinates (pane-local + rect offset). The window shows it
-        // only for the focused pane. None => the app hid it / it's off-viewport.
-        let cursor = if let Some(cur) = snap.cursor_viewport()? {
+        // only for the focused pane. None => the app hid it (DECTCEM `?25l`) or it's
+        // off-viewport. cursor_viewport() only reports position/on-screen, NOT the hide
+        // mode, so we must also check cursor_visible() — otherwise apps like btop that
+        // hide the cursor still get one drawn.
+        let cursor = if snap.cursor_visible()? && let Some(cur) = snap.cursor_viewport()? {
             // DECSCUSR (CSI Ps SP q): odd codes blink, even are steady.
             let blink = snap.cursor_blinking()?;
             let shape = match snap.cursor_visual_style()? {
