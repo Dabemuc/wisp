@@ -27,12 +27,12 @@ pub fn draw_cursor(frame: &mut String, cursor_data: CursorDataDTO) {
 }
 
 /// Render the top bar with window IDs and highlight the focused window.
-fn render_top_bar(ws: Winsize, window_ids: Vec<u16>, focused_window_id: u16) -> String {
+fn render_top_bar(ws: Winsize, mut window_ids: Vec<u16>, focused_window_id: u16) -> String {
     let cols = ws.ws_col as usize;
 
     // Build the visible label text first, in a STABLE order (HashMap iteration
     // order is nondeterministic, which would make the tabs jump around).
-    window_ids.to_owned().sort_unstable();
+    window_ids.sort_unstable();
 
     let mut labels = String::new();
     for window_id in window_ids {

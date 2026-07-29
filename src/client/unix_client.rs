@@ -3,6 +3,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -51,18 +52,23 @@ impl UnixClient {
         let (mut rd, mut wr) = self.socket.into_split();
 
         // Attach, reporting our terminal size (the server has no terminal to measure).
-        let mut ws = query_winsize();
+        // Shared so the reader task can read the CURRENT size when drawing the top bar,
+        // while the resize handler updates it. Winsize is Copy, so we copy out under the
+        // lock and never hold the guard across an `.await`.
+        let ws = Arc::new(Mutex::new(query_winsize()));
+        let initial = *ws.lock().unwrap();
         write_msg(
             &mut wr,
             &ClientMessage::Attach {
-                cols: ws.ws_col,
-                rows: ws.ws_row,
+                cols: initial.ws_col,
+                rows: initial.ws_row,
             },
         )
         .await?;
 
         // server -> screen, in its OWN task. Framed reads span two awaits, so they must not
         // live in a `select!` arm (a cancellation mid-frame would desync the stream forever).
+        let ws_reader = ws.clone();
         let mut reader = tokio::spawn(async move {
             let mut out = tokio::io::stdout();
             loop {
@@ -76,6 +82,8 @@ impl UnixClient {
                     Ok(ServerMessage::FrameData(data)) => {
                         let mut ui_overlay = String::new();
 
+                        // Current size (copied out; the guard is dropped before the awaits below).
+                        let ws = *ws_reader.lock().unwrap();
                         draw_ui(
                             &mut ui_overlay,
                             ws,
@@ -136,10 +144,11 @@ impl UnixClient {
 
                 // Terminal resized -> re-measure and tell the server.
                 _ = winch.recv() => {
-                    ws = query_winsize();
+                    let new_ws = query_winsize();
+                    *ws.lock().unwrap() = new_ws;
                     write_msg(
                         &mut wr,
-                        &ClientMessage::Resize { cols: ws.ws_col, rows: ws.ws_row },
+                        &ClientMessage::Resize { cols: new_ws.ws_col, rows: new_ws.ws_row },
                     )
                     .await?;
                 }
