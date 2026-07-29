@@ -12,6 +12,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use nix::pty::Winsize;
 
 use crate::client::raw_mode_guard::RawModeGuard;
+use crate::client::ui::{draw_cursor, draw_ui};
 use crate::common::protocoll::{ClientMessage, ServerMessage, read_msg, write_msg};
 
 const ROWS: u16 = 32;
@@ -50,7 +51,7 @@ impl UnixClient {
         let (mut rd, mut wr) = self.socket.into_split();
 
         // Attach, reporting our terminal size (the server has no terminal to measure).
-        let ws = query_winsize();
+        let mut ws = query_winsize();
         write_msg(
             &mut wr,
             &ClientMessage::Attach {
@@ -70,6 +71,25 @@ impl UnixClient {
                         if out.write_all(&bytes).await.is_err() {
                             break;
                         }
+                        let _ = out.flush().await;
+                    }
+                    Ok(ServerMessage::FrameData(data)) => {
+                        let mut ui_overlay = String::new();
+
+                        draw_ui(
+                            &mut ui_overlay,
+                            ws,
+                            data.border_cells,
+                            data.window_ids,
+                            data.focused_window_id,
+                        );
+
+                        if let Some(focused_cursor) = data.focused_cursor {
+                            draw_cursor(&mut ui_overlay, focused_cursor);
+                        }
+
+                        let _ = out.write_all(&data.rendered_panes).await;
+                        let _ = out.write_all(ui_overlay.as_bytes()).await;
                         let _ = out.flush().await;
                     }
                     Ok(ServerMessage::Bell) => {
@@ -116,7 +136,7 @@ impl UnixClient {
 
                 // Terminal resized -> re-measure and tell the server.
                 _ = winch.recv() => {
-                    let ws = query_winsize();
+                    ws = query_winsize();
                     write_msg(
                         &mut wr,
                         &ClientMessage::Resize { cols: ws.ws_col, rows: ws.ws_row },

@@ -9,6 +9,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::mux::Mux;
+use crate::common::dtos::{CursorDataDTO, FrameDataDTO};
 use crate::common::protocoll::ServerMessage;
 
 /// Commands the async side sends TO a session's (single-threaded, !Send) mux.
@@ -177,10 +178,26 @@ fn run_session(cmd_rx: std_mpsc::Receiver<SessionCmd>, wake_r: OwnedFd, shutdown
         // --- render once, broadcast to attached clients (dropping dead ones) ---
         if dirty
             && !clients.is_empty()
-            && let Ok(frame) = mux.render_frame()
+            && let Ok((frame, focused_cursor, border_cells)) = mux.render_frame()
         {
-            let bytes = frame.into_bytes();
-            clients.retain(|c| c.send(ServerMessage::Frame(bytes.clone())).is_ok());
+            let (window_ids, focused_window_id) = mux.get_window_info();
+            let cursor_dto: Option<CursorDataDTO> =
+                focused_cursor.as_ref().map(|cur| CursorDataDTO {
+                    screen_x: cur.screen_x,
+                    screen_y: cur.screen_y,
+                    shape: cur.shape,
+                });
+
+            clients.retain(|c| {
+                c.send(ServerMessage::FrameData(FrameDataDTO {
+                    rendered_panes: frame.clone().into_bytes(),
+                    focused_cursor: cursor_dto.clone(),
+                    border_cells: border_cells.clone(),
+                    window_ids: window_ids.clone(),
+                    focused_window_id,
+                }))
+                .is_ok()
+            });
         }
     }
 }

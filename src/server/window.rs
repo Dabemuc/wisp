@@ -265,7 +265,9 @@ impl WindowHandle {
 
     /// Render every pane into its screen rect, composite them, and place the single real
     /// cursor at the focused pane's cursor.
-    pub fn render(&mut self) -> Result<(String, Option<PaneCursor>), Box<dyn std::error::Error>> {
+    pub fn render(
+        &mut self,
+    ) -> Result<(String, Option<PaneCursor>, HashSet<(u16, u16)>), Box<dyn std::error::Error>> {
         // Build a map of pane_id -> frame for all panes
         let mut pane_frames: HashMap<PaneId, String> = HashMap::new();
         let mut focused_cursor: Option<PaneCursor> = None;
@@ -295,24 +297,7 @@ impl WindowHandle {
             }
         }
 
-        // Paint each border cell once, choosing the box-drawing glyph from its arms.
-        use std::fmt::Write as _;
-        frame.push_str("\x1b[0m"); // borders in the default pen
-        for &(x, y) in &cells {
-            let up = y > 0 && cells.contains(&(x, y - 1));
-            let down = cells.contains(&(x, y + 1));
-            let left = x > 0 && cells.contains(&(x - 1, y));
-            let right = cells.contains(&(x + 1, y));
-            write!(
-                frame,
-                "\x1b[{};{}H{}",
-                y + 1,
-                x + 1,
-                box_glyph(up, down, left, right)
-            )?;
-        }
-
-        Ok((frame, focused_cursor))
+        Ok((frame, focused_cursor, cells))
     }
 
     /// Recursively concatenate pane frames. Order doesn't matter — each pane's bytes are
@@ -445,26 +430,4 @@ fn overlap_1d(a: u16, alen: u16, b: u16, blen: u16) -> u16 {
     let start = a.max(b);
     let end = (a + alen).min(b + blen);
     end.saturating_sub(start)
-}
-
-/// Pick the box-drawing glyph for a border cell from which of its 4 neighbors are also
-/// borders. A lone vertical/horizontal arm falls back to the straight line.
-fn box_glyph(up: bool, down: bool, left: bool, right: bool) -> char {
-    match (up, down, left, right) {
-        (true, true, true, true) => '┼',
-        (true, true, true, false) => '┤',
-        (true, true, false, true) => '├',
-        (true, true, false, false) => '│',
-        (true, false, true, true) => '┴',
-        (false, true, true, true) => '┬',
-        (true, false, true, false) => '┘',
-        (true, false, false, true) => '└',
-        (false, true, true, false) => '┐',
-        (false, true, false, true) => '┌',
-        (false, false, true, true) => '─',
-        // Stubs (segment ends): render as the straight line they belong to.
-        (true, false, false, false) | (false, true, false, false) => '│',
-        (false, false, true, false) | (false, false, false, true) => '─',
-        (false, false, false, false) => ' ',
-    }
 }

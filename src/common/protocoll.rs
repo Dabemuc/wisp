@@ -2,6 +2,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::common::dtos::FrameDataDTO;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientMessage {
     // control
@@ -19,6 +21,7 @@ pub enum ServerMessage {
     Sessions(Vec<String>),
     // data
     Frame(Vec<u8>),
+    FrameData(FrameDataDTO),
     Bell,
 }
 

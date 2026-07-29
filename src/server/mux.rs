@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::{collections::HashMap, os::fd::BorrowedFd};
 
 use nix::pty::Winsize;
+
+use crate::server::pane::PaneCursor;
 
 use super::command_state_machine::{CommandStateMachine, WispCommand};
 use super::geometry::PaneRect;
@@ -136,9 +139,11 @@ impl Mux {
 
     /// Compose the focused window + top bar into one frame of bytes for the client.
     /// (No stdout — the server ships this over the socket.)
-    pub fn render_frame(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn render_frame(
+        &mut self,
+    ) -> Result<(String, Option<PaneCursor>, HashSet<(u16, u16)>), Box<dyn std::error::Error>> {
         // Render focused window
-        let (mut frame, focused_cursor) = self
+        let (frame, focused_cursor, border_cells) = self
             .windows
             .get_mut(&self.focused_window_id)
             .ok_or(std::io::Error::new(
@@ -147,54 +152,14 @@ impl Mux {
             ))?
             .render()?;
 
-        // Render top bar
-        frame.push_str(&self.render_top_bar());
-
-        // One real cursor: place + reveal it only for the focused pane.
-        if let Some(c) = &focused_cursor {
-            use std::fmt::Write as _;
-            write!(
-                frame,
-                "\x1b[{} q\x1b[{};{}H\x1b[?25h",
-                c.shape, c.screen_y, c.screen_x
-            )?;
-        }
-
-        Ok(frame)
+        Ok((frame, focused_cursor, border_cells))
     }
 
-    /// Render the top bar with window IDs and highlight the focused window.
-    fn render_top_bar(&self) -> String {
-        let cols = self.current_ws.ws_col as usize;
-
-        // Build the visible label text first, in a STABLE order (HashMap iteration
-        // order is nondeterministic, which would make the tabs jump around).
-        let mut ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        ids.sort_unstable();
-
-        let mut labels = String::new();
-        for window_id in ids {
-            if window_id == self.focused_window_id {
-                labels.push_str(&format!(" [{}] ", window_id));
-            } else {
-                labels.push_str(&format!("  {}  ", window_id));
-            }
-        }
-
-        // Truncate to the width, then pad with spaces so the ENTIRE row is repainted
-        // each frame — this both erases stale chars and extends the bar's background.
-        let mut visible: String = labels.chars().take(cols).collect();
-        for _ in visible.chars().count()..cols {
-            visible.push(' ');
-        }
-
-        let mut top_bar = String::new();
-        top_bar.push_str("\x1b[?25l"); // hide the cursor while we redraw everything
-        top_bar.push_str("\x1b[H"); // move cursor to top-left
-        top_bar.push_str("\x1b[7m"); // reverse video for the top bar
-        top_bar.push_str(&visible);
-        top_bar.push_str("\x1b[0m"); // reset attributes
-        top_bar
+    pub fn get_window_info(&self) -> (Vec<u16>, u16) {
+        (
+            self.windows.keys().map(|&k| k as u16).collect(),
+            self.focused_window_id as u16,
+        )
     }
 
     /// Remove a pane whose shell has exited (also on non focused windows).
