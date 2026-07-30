@@ -14,7 +14,7 @@ impl From<ServerCommandDTO> for ServerCommand {
             }
             ServerCommandDTO::CreateNewWindow => Self::Session(SessionCommand::CreateNewWindow),
             ServerCommandDTO::SwitchToWindow(id) => {
-                Self::Session(SessionCommand::SwitchToWindow(id))
+                Self::Session(SessionCommand::SwitchToWindow(id.into()))
             }
             ServerCommandDTO::FocusPane(d) => Self::Session(SessionCommand::FocusPane(d.into())),
         }
@@ -25,7 +25,7 @@ impl From<ServerCommandDTO> for ServerCommand {
 pub enum SessionCommand {
     SplitFocusedWindow(SplitDirection),
     CreateNewWindow,
-    SwitchToWindow(usize),
+    SwitchToWindow(usize), // TODO: Probably switch to u16
     FocusPane(FocusDirection),
 }
 

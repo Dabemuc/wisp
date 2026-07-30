@@ -22,7 +22,7 @@ pub struct CursorDataDTO {
 pub enum ServerCommandDTO {
     SplitFocusedWindow(SplitDirectionDTO),
     CreateNewWindow,
-    SwitchToWindow(usize),
+    SwitchToWindow(u16),
     FocusPane(FocusDirectionDTO),
 }
 

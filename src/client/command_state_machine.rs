@@ -58,7 +58,7 @@ impl CommandStateMachine {
                             commands.push(SessionCommand::FocusPane(FocusDirection::Right).into())
                         }
                         b'0'..=b'9' => {
-                            let window_index = (b - b'0') as usize;
+                            let window_index = (b - b'0') as u16;
                             commands.push(SessionCommand::SwitchToWindow(window_index).into());
                         }
                         _ => {} // unknown command -> swallow

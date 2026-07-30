@@ -18,7 +18,7 @@ impl From<ServerCommand> for ServerCommandDTO {
 pub enum SessionCommand {
     SplitFocusedWindow(SplitDirection),
     CreateNewWindow,
-    SwitchToWindow(usize),
+    SwitchToWindow(u16),
     FocusPane(FocusDirection),
 }
 

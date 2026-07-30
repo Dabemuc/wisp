@@ -154,17 +154,20 @@ impl UnixClient {
 
                 // Keyboard bytes from the reader thread -> forward to the server.
                 maybe = rx.recv() => {
-                    // TODO: Hier muss ich jz die commands parsen usw
                     match maybe {
                         Some(bytes) => {
                             // Parse input for commands
+                            // TODO: This should be refactored to a ordered list of commands and
+                            // input bytes. Currently "abc" + Ctrl-b h + "def" could become FocusPane first, then Input("abcdef")
                             let (commands, remaining_bytes) = self.command_state_machine.parse_input(bytes);
                             // Send commands to server
                             for c in commands {
                                 write_msg(&mut wr, &ClientMessage::ExecuteServerCommand(c.into())).await?;
                             }
                             // Send non-command bytes to server
-                            write_msg(&mut wr, &ClientMessage::Input(remaining_bytes)).await?;
+                            if !remaining_bytes.is_empty() {
+                                write_msg(&mut wr, &ClientMessage::Input(remaining_bytes)).await?;
+                            }
                         },
                         None => break, // reader thread ended (tty EOF)
                     }
