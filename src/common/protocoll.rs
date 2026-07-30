@@ -2,7 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::common::dtos::FrameDataDTO;
+use crate::common::dtos::{FrameDataDTO, ServerCommandDTO};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientMessage {
@@ -13,6 +13,7 @@ pub enum ClientMessage {
     // data
     Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
+    ExecuteServerCommand(ServerCommandDTO),
 }
 
 #[derive(Serialize, Deserialize, Debug)]

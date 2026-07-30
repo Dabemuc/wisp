@@ -17,3 +17,25 @@ pub struct CursorDataDTO {
     pub screen_y: u16, // 1-based row on the real screen
     pub shape: u8,     // DECSCUSR code
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ServerCommandDTO {
+    SplitFocusedWindow(SplitDirectionDTO),
+    CreateNewWindow,
+    SwitchToWindow(usize),
+    FocusPane(FocusDirectionDTO),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SplitDirectionDTO {
+    SplitHorizontal,
+    SplitVertical,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum FocusDirectionDTO {
+    Left,
+    Right,
+    Up,
+    Down,
+}

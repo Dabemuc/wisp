@@ -154,7 +154,7 @@ impl PaneHandle {
                 }
 
                 // Emit the SGR pen only when it changes cell-to-cell (no allocation to compare).
-                let pen = Pen::of(&cell)?;
+                let pen = Pen::of(cell)?;
                 if pen != last_pen {
                     pen.write_sgr(frame);
                     last_pen = pen;
@@ -174,7 +174,9 @@ impl PaneHandle {
         // off-viewport. cursor_viewport() only reports position/on-screen, NOT the hide
         // mode, so we must also check cursor_visible() — otherwise apps like btop that
         // hide the cursor still get one drawn.
-        let cursor = if snap.cursor_visible()? && let Some(cur) = snap.cursor_viewport()? {
+        let cursor = if snap.cursor_visible()?
+            && let Some(cur) = snap.cursor_viewport()?
+        {
             // DECSCUSR (CSI Ps SP q): odd codes blink, even are steady.
             let blink = snap.cursor_blinking()?;
             let shape = match snap.cursor_visual_style()? {

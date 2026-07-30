@@ -11,9 +11,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::mux::Mux;
 use crate::common::dtos::{CursorDataDTO, FrameDataDTO};
 use crate::common::protocoll::ServerMessage;
+use crate::server::business_objects::SessionCommand;
 
-/// Commands the async side sends TO a session's (single-threaded, !Send) mux.
-pub enum SessionCmd {
+enum MessageToSessionThread {
     /// A client attached: register its frame channel and adopt its size.
     Attach {
         frames: UnboundedSender<ServerMessage>,
@@ -25,13 +25,14 @@ pub enum SessionCmd {
         cols: u16,
         rows: u16,
     },
+    ExecuteCommand(SessionCommand),
 }
 
 /// A cheap, cloneable handle to one session (one mux thread). Sending pushes a command
 /// and nudges the mux thread's poll via a self-pipe.
 #[derive(Clone)]
 pub struct SessionHandle {
-    cmd_tx: std_mpsc::Sender<SessionCmd>,
+    cmd_tx: std_mpsc::Sender<MessageToSessionThread>,
     wake: Arc<OwnedFd>,
 }
 
@@ -53,7 +54,7 @@ impl SessionHandle {
             libc::fcntl(wake_w.as_raw_fd(), libc::F_SETFL, f | libc::O_NONBLOCK);
         }
 
-        let (cmd_tx, cmd_rx) = std_mpsc::channel::<SessionCmd>();
+        let (cmd_tx, cmd_rx) = std_mpsc::channel::<MessageToSessionThread>();
 
         // The Mux is BORN on this thread and never leaves it — that's what makes its
         // !Send contents legal. Only Send things (commands, senders, byte vecs) cross.
@@ -65,7 +66,24 @@ impl SessionHandle {
         }
     }
 
-    pub fn send(&self, cmd: SessionCmd) {
+    pub fn handle_command(&self, cmd: SessionCommand) {
+        self.send(MessageToSessionThread::ExecuteCommand(cmd));
+    }
+
+    /// TODO: To be folded into command
+    pub fn handle_attach(&self, frames: UnboundedSender<ServerMessage>, cols: u16, rows: u16) {
+        self.send(MessageToSessionThread::Attach { frames, cols, rows })
+    }
+
+    pub fn handle_input(&self, bytes: Vec<u8>) {
+        self.send(MessageToSessionThread::Input(bytes))
+    }
+
+    pub fn handle_resize(&self, cols: u16, rows: u16) {
+        self.send(MessageToSessionThread::Resize { cols, rows })
+    }
+
+    fn send(&self, cmd: MessageToSessionThread) {
         let _ = self.cmd_tx.send(cmd);
         // Nudge the mux thread's poll(). One byte, non-blocking, coalescing — if the pipe
         // is already "armed" a failed write is harmless (a wake is already pending).
@@ -79,7 +97,11 @@ impl SessionHandle {
 /// The session event loop. Owns the (!Send) `Mux` for the session's lifetime. This is the
 /// old single-process reactor, re-plumbed: "stdin" is the command channel (woken by the
 /// self-pipe), "stdout" is each attached client's frame channel.
-fn run_session(cmd_rx: std_mpsc::Receiver<SessionCmd>, wake_r: OwnedFd, shutdown: Arc<Notify>) {
+fn run_session(
+    cmd_rx: std_mpsc::Receiver<MessageToSessionThread>,
+    wake_r: OwnedFd,
+    shutdown: Arc<Notify>,
+) {
     // Child shells must see a TERM matching what libghostty-vt emulates. Set it here,
     // before Mux::new forks any pane.
     unsafe { std::env::set_var("TERM", "xterm-256color") };
@@ -137,18 +159,21 @@ fn run_session(cmd_rx: std_mpsc::Receiver<SessionCmd>, wake_r: OwnedFd, shutdown
             }
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
-                    SessionCmd::Attach { frames, cols, rows } => {
+                    MessageToSessionThread::Attach { frames, cols, rows } => {
                         let _ = mux.resize(winsize(cols, rows));
                         clients.push(frames);
                         dirty = true; // send the current screen to the newcomer
                     }
-                    SessionCmd::Input(bytes) => {
+                    MessageToSessionThread::Input(bytes) => {
                         let _ = mux.handle_input(&bytes);
                         dirty = true;
                     }
-                    SessionCmd::Resize { cols, rows } => {
+                    MessageToSessionThread::Resize { cols, rows } => {
                         let _ = mux.resize(winsize(cols, rows));
                         dirty = true;
+                    }
+                    MessageToSessionThread::ExecuteCommand(cmd) => {
+                        let _ = handle_command(&mut mux, cmd);
                     }
                 }
             }
@@ -208,5 +233,17 @@ fn winsize(cols: u16, rows: u16) -> Winsize {
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
+    }
+}
+
+fn handle_command(mux: &mut Mux, cmd: SessionCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        SessionCommand::SplitFocusedWindow(dir) => {
+            // Just mutate — the mux thread re-renders once after handling input.
+            mux.split_focused(dir)
+        }
+        SessionCommand::CreateNewWindow => mux.create_new_window(),
+        SessionCommand::SwitchToWindow(window_id) => mux.switch_to_window(window_id),
+        SessionCommand::FocusPane(dir) => mux.focus_pane(dir),
     }
 }

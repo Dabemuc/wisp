@@ -3,22 +3,10 @@ use std::{
     os::fd::BorrowedFd,
 };
 
+use crate::server::business_objects::{FocusDirection, SplitDirection};
+
 use super::geometry::PaneRect;
 use super::pane::{PaneCursor, PaneHandle};
-
-#[derive(Clone, Copy)]
-pub enum SplitDirection {
-    SplitHorizontal,
-    SplitVertical,
-}
-
-#[derive(Clone, Copy)]
-pub enum FocusDirection {
-    Left,
-    Right,
-    Up,
-    Down,
-}
 
 type PaneId = usize;
 

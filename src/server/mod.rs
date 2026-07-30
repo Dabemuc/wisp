@@ -1,4 +1,4 @@
-mod command_state_machine;
+mod business_objects;
 mod geometry;
 mod mux;
 mod pane;

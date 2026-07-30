@@ -4,8 +4,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::unbounded_channel;
 
-use super::session::{SessionCmd, SessionHandle};
+use super::session::SessionHandle;
 use crate::common::protocoll::{ClientMessage, ServerMessage, read_msg, write_msg};
+use crate::server::business_objects::ServerCommand;
 
 pub struct UnixServer {
     listener: UnixListener,
@@ -76,18 +77,16 @@ async fn handle_connection(conn: UnixStream, shutdown: Arc<Notify>, session: Ses
     // client's socket -> session
     loop {
         match read_msg::<_, ClientMessage>(&mut rd).await {
+            // TODO: To be folded into command
             Ok(ClientMessage::Attach { cols, rows }) => {
                 println!("[SERVER] A client attached ({cols}x{rows})");
-                session.send(SessionCmd::Attach {
-                    frames: frame_tx.clone(),
-                    cols,
-                    rows,
-                });
+                session.handle_attach(frame_tx.clone(), cols, rows);
             }
-            Ok(ClientMessage::Input(bytes)) => session.send(SessionCmd::Input(bytes)),
-            Ok(ClientMessage::Resize { cols, rows }) => {
-                session.send(SessionCmd::Resize { cols, rows })
+            Ok(ClientMessage::ExecuteServerCommand(cmd)) => {
+                handle_command(&session, cmd.into());
             }
+            Ok(ClientMessage::Input(bytes)) => session.handle_input(bytes),
+            Ok(ClientMessage::Resize { cols, rows }) => session.handle_resize(cols, rows),
             Ok(ClientMessage::ListSessions) => {
                 let _ = frame_tx.send(ServerMessage::Sessions(vec![]));
             }
@@ -100,4 +99,11 @@ async fn handle_connection(conn: UnixStream, shutdown: Arc<Notify>, session: Ses
         }
     }
     writer.abort();
+}
+
+fn handle_command(session: &SessionHandle, cmd: ServerCommand) {
+    match cmd {
+        // No commands to handle on server layer yet. Just command to forward to session
+        ServerCommand::Session(sess_cmd) => session.handle_command(sess_cmd),
+    }
 }

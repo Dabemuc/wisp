@@ -3,9 +3,9 @@ use std::{collections::HashMap, os::fd::BorrowedFd};
 
 use nix::pty::Winsize;
 
+use crate::server::business_objects::{FocusDirection, SplitDirection};
 use crate::server::pane::PaneCursor;
 
-use super::command_state_machine::{CommandStateMachine, WispCommand};
 use super::geometry::PaneRect;
 use super::window::WindowHandle;
 
@@ -30,7 +30,6 @@ fn content_rect(ws: Winsize) -> PaneRect {
 pub struct Mux {
     windows: HashMap<WindowId, WindowHandle>,
     focused_window_id: WindowId,
-    command_state: CommandStateMachine,
     current_ws: Winsize, // Last known terminal size
 }
 
@@ -40,7 +39,6 @@ impl Mux {
         Ok(Self {
             windows: HashMap::from([(1, init_window)]),
             focused_window_id: 1,
-            command_state: CommandStateMachine::new(),
             current_ws: ws,
         })
     }
@@ -55,46 +53,16 @@ impl Mux {
     }
 
     /// Keyboard bytes -> the focused window.
-    /// Also extract and handle mux commands (prefix + command byte).
+    /// Command parsing has been moved to the client
     pub fn handle_input(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        // Extract
-        let (commands, remaining_bytes) = self.command_state.parse_input(bytes);
-
-        // Handle commands
-        for command in commands {
-            match command {
-                WispCommand::SplitFocusedWindow(dir) => {
-                    // Just mutate — the mux thread re-renders once after handling input.
-                    self.focused_window_mut()?.split_focused(dir)?;
-                }
-                WispCommand::CreateNewWindow => {
-                    // tmux-style: take the smallest free id in 1..=9 (fills gaps left by
-                    // closed windows). If all 9 are taken, do nothing.
-                    if let Some(new_window_id) = self.next_free_window_id() {
-                        let new_window = WindowHandle::new(content_rect(self.current_ws))?;
-                        self.windows.insert(new_window_id, new_window);
-                        self.focused_window_id = new_window_id;
-                    }
-                }
-                WispCommand::SwitchToWindow(window_id) => {
-                    if self.windows.contains_key(&window_id) {
-                        self.focused_window_id = window_id;
-                    }
-                }
-                WispCommand::FocusPane(dir) => {
-                    self.focused_window_mut()?.focus_pane(dir);
-                }
-            }
-        }
-
-        // Forward remaining bytes to the focused window
+        // Forward bytes to the focused window
         self.windows
             .get_mut(&self.focused_window_id)
             .ok_or(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Focused window not found",
             ))?
-            .handle_input(remaining_bytes.as_slice())?;
+            .handle_input(bytes.as_ref())?;
 
         Ok(())
     }
@@ -111,6 +79,34 @@ impl Mux {
                 std::io::ErrorKind::NotFound,
                 "Focused window not found",
             ))
+    }
+
+    pub fn split_focused(&mut self, dir: SplitDirection) -> Result<(), Box<dyn std::error::Error>> {
+        self.focused_window_mut()?.split_focused(dir)?;
+        Ok(())
+    }
+
+    /// tmux-style: take the smallest free id in 1..=9 (fills gaps left by
+    /// closed windows). If all 9 are taken, do nothing.
+    pub fn create_new_window(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(new_window_id) = self.next_free_window_id() {
+            let new_window = WindowHandle::new(content_rect(self.current_ws))?;
+            self.windows.insert(new_window_id, new_window);
+            self.focused_window_id = new_window_id;
+        };
+        Ok(())
+    }
+
+    pub fn switch_to_window(&mut self, window_id: usize) -> Result<(), Box<dyn std::error::Error>> {
+        if self.windows.contains_key(&window_id) {
+            self.focused_window_id = window_id;
+        }
+        Ok(())
+    }
+
+    pub fn focus_pane(&mut self, dir: FocusDirection) -> Result<(), Box<dyn std::error::Error>> {
+        self.focused_window_mut()?.focus_pane(dir);
+        Ok(())
     }
 
     /// Drain the output of a pane the reactor flagged readable.

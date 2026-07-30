@@ -12,6 +12,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use nix::pty::Winsize;
 
+use crate::client::command_state_machine::CommandStateMachine;
 use crate::client::raw_mode_guard::RawModeGuard;
 use crate::client::ui::{draw_cursor, draw_ui};
 use crate::common::protocoll::{ClientMessage, ServerMessage, read_msg, write_msg};
@@ -23,6 +24,7 @@ nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
 
 pub struct UnixClient {
     socket: UnixStream,
+    command_state_machine: CommandStateMachine,
 }
 
 impl UnixClient {
@@ -40,11 +42,14 @@ impl UnixClient {
             }
         };
         println!("[CLIENT] Connected");
-        UnixClient { socket }
+        UnixClient {
+            socket,
+            command_state_machine: CommandStateMachine::new(),
+        }
     }
 
     /// The client is a thin async pump: keyboard + resize -> server, frames -> screen.
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Raw mode on the controlling terminal; restored automatically on drop (any exit path).
         let _raw = RawModeGuard::enable()?;
 
@@ -149,8 +154,18 @@ impl UnixClient {
 
                 // Keyboard bytes from the reader thread -> forward to the server.
                 maybe = rx.recv() => {
+                    // TODO: Hier muss ich jz die commands parsen usw
                     match maybe {
-                        Some(bytes) => write_msg(&mut wr, &ClientMessage::Input(bytes)).await?,
+                        Some(bytes) => {
+                            // Parse input for commands
+                            let (commands, remaining_bytes) = self.command_state_machine.parse_input(bytes);
+                            // Send commands to server
+                            for c in commands {
+                                write_msg(&mut wr, &ClientMessage::ExecuteServerCommand(c.into())).await?;
+                            }
+                            // Send non-command bytes to server
+                            write_msg(&mut wr, &ClientMessage::Input(remaining_bytes)).await?;
+                        },
                         None => break, // reader thread ended (tty EOF)
                     }
                 }
