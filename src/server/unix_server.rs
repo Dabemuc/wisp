@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::session::SessionHandle;
 use crate::common::protocoll::{ClientMessage, ServerMessage, read_msg, write_msg};
@@ -77,33 +77,44 @@ async fn handle_connection(conn: UnixStream, shutdown: Arc<Notify>, session: Ses
     // client's socket -> session
     loop {
         match read_msg::<_, ClientMessage>(&mut rd).await {
-            // TODO: To be folded into command
-            Ok(ClientMessage::Attach { cols, rows }) => {
-                println!("[SERVER] A client attached ({cols}x{rows})");
-                session.handle_attach(frame_tx.clone(), cols, rows);
-            }
             Ok(ClientMessage::ExecuteServerCommand(cmd)) => {
-                handle_command(&session, cmd.into());
+                match handle_command(&session, &frame_tx, &shutdown, cmd.into()) {
+                    CommandResult::Shutdown => break,
+                    _ => continue,
+                }
             }
             Ok(ClientMessage::Input(bytes)) => session.handle_input(bytes),
             Ok(ClientMessage::Resize { cols, rows }) => session.handle_resize(cols, rows),
-            Ok(ClientMessage::ListSessions) => {
-                let _ = frame_tx.send(ServerMessage::Sessions(vec![]));
-            }
-            Ok(ClientMessage::KillServer) => {
-                println!("[SERVER] Killed");
-                shutdown.notify_one();
-                break;
-            }
             Err(_) => break, // client disconnected
         }
     }
     writer.abort();
 }
 
-fn handle_command(session: &SessionHandle, cmd: ServerCommand) {
+enum CommandResult {
+    Shutdown,
+    None,
+}
+
+fn handle_command(
+    session: &SessionHandle,
+    frame_tx: &UnboundedSender<ServerMessage>,
+    shutdown: &Arc<Notify>,
+    cmd: ServerCommand,
+) -> CommandResult {
     match cmd {
-        // No commands to handle on server layer yet. Just command to forward to session
+        ServerCommand::KillServer => {
+            println!("[SERVER] Killed");
+            shutdown.notify_one();
+            return CommandResult::Shutdown;
+        }
+        ServerCommand::ListSessions => {
+            // Not impleneted/used yet. Send empty array for now
+            let _ = frame_tx.send(ServerMessage::Sessions(vec![]));
+        }
+        ServerCommand::Attach(ts) => session.handle_attach(frame_tx.clone(), ts.cols, ts.rows),
         ServerCommand::Session(sess_cmd) => session.handle_command(sess_cmd),
     }
+
+    CommandResult::None
 }

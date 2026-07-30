@@ -12,6 +12,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use nix::pty::Winsize;
 
+use crate::client::business_objects::{ServerCommand, TermSize};
 use crate::client::command_state_machine::CommandStateMachine;
 use crate::client::raw_mode_guard::RawModeGuard;
 use crate::client::ui::{draw_cursor, draw_ui};
@@ -64,10 +65,13 @@ impl UnixClient {
         let initial = *ws.lock().unwrap();
         write_msg(
             &mut wr,
-            &ClientMessage::Attach {
-                cols: initial.ws_col,
-                rows: initial.ws_row,
-            },
+            &ClientMessage::ExecuteServerCommand(
+                ServerCommand::Attach(TermSize {
+                    cols: initial.ws_col,
+                    rows: initial.ws_row,
+                })
+                .into(),
+            ),
         )
         .await?;
 
@@ -181,7 +185,11 @@ impl UnixClient {
 
     /// Connect and tell the server to shut down.
     pub async fn kill_server(mut self) {
-        let _ = write_msg(&mut self.socket, &ClientMessage::KillServer).await;
+        let _ = write_msg(
+            &mut self.socket,
+            &ClientMessage::ExecuteServerCommand(ServerCommand::KillServer.into()),
+        )
+        .await;
     }
 }
 

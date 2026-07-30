@@ -1,14 +1,19 @@
-use crate::common::dtos::{FocusDirectionDTO, ServerCommandDTO, SplitDirectionDTO};
+use crate::common::dtos::{FocusDirectionDTO, ServerCommandDTO, SplitDirectionDTO, TermSizeDTO};
 
 #[derive(Clone, Copy)]
 pub enum ServerCommand {
-    // No commands to handle at server level yet. Only pass through to session
+    KillServer,
+    ListSessions,
+    Attach(TermSize),
     Session(SessionCommand),
 }
 
 impl From<ServerCommandDTO> for ServerCommand {
     fn from(dto: ServerCommandDTO) -> Self {
         match dto {
+            ServerCommandDTO::KillServer => Self::KillServer,
+            ServerCommandDTO::ListSessions => Self::ListSessions,
+            ServerCommandDTO::Attach(ts) => Self::Attach(ts.into()),
             ServerCommandDTO::SplitFocusedWindow(d) => {
                 Self::Session(SessionCommand::SplitFocusedWindow(d.into()))
             }
@@ -17,6 +22,21 @@ impl From<ServerCommandDTO> for ServerCommand {
                 Self::Session(SessionCommand::SwitchToWindow(id.into()))
             }
             ServerCommandDTO::FocusPane(d) => Self::Session(SessionCommand::FocusPane(d.into())),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct TermSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+impl From<TermSizeDTO> for TermSize {
+    fn from(ts: TermSizeDTO) -> Self {
+        Self {
+            rows: ts.rows,
+            cols: ts.cols,
         }
     }
 }

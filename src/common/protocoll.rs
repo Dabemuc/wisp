@@ -7,13 +7,10 @@ use crate::common::dtos::{FrameDataDTO, ServerCommandDTO};
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientMessage {
     // control
-    Attach { cols: u16, rows: u16 },
-    KillServer,
-    ListSessions,
+    ExecuteServerCommand(ServerCommandDTO),
     // data
     Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
-    ExecuteServerCommand(ServerCommandDTO),
 }
 
 #[derive(Serialize, Deserialize, Debug)]

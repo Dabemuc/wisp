@@ -20,10 +20,19 @@ pub struct CursorDataDTO {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerCommandDTO {
+    KillServer,
+    ListSessions,
+    Attach(TermSizeDTO),
     SplitFocusedWindow(SplitDirectionDTO),
     CreateNewWindow,
     SwitchToWindow(u16),
     FocusPane(FocusDirectionDTO),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TermSizeDTO {
+    pub rows: u16,
+    pub cols: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
