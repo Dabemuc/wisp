@@ -174,6 +174,7 @@ fn run_session(
                     }
                     MessageToSessionThread::ExecuteCommand(cmd) => {
                         let _ = handle_command(&mut mux, cmd);
+                        dirty = true;
                     }
                 }
             }

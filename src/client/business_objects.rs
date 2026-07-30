@@ -1,11 +1,35 @@
 use crate::common::dtos::{FocusDirectionDTO, ServerCommandDTO, SplitDirectionDTO, TermSizeDTO};
 
+pub enum WispCommand {
+    Client(ClientCommand),
+    Server(ServerCommand),
+}
+
+pub enum ClientCommand {
+    Detach,
+}
+
+impl From<ClientCommand> for WispCommand {
+    fn from(c: ClientCommand) -> Self {
+        Self::Client(c)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum ServerCommand {
     KillServer,
     ListSessions,
     Attach(TermSize),
-    Session(SessionCommand),
+    SplitFocusedWindow(SplitDirection),
+    CreateNewWindow,
+    SwitchToWindow(u16),
+    FocusPane(FocusDirection),
+}
+
+impl From<ServerCommand> for WispCommand {
+    fn from(c: ServerCommand) -> Self {
+        Self::Server(c)
+    }
 }
 
 impl From<ServerCommand> for ServerCommandDTO {
@@ -14,7 +38,10 @@ impl From<ServerCommand> for ServerCommandDTO {
             ServerCommand::KillServer => Self::KillServer,
             ServerCommand::ListSessions => Self::ListSessions,
             ServerCommand::Attach(s) => Self::Attach(s.into()),
-            ServerCommand::Session(sc) => sc.into(),
+            ServerCommand::SplitFocusedWindow(d) => Self::SplitFocusedWindow(d.into()),
+            ServerCommand::CreateNewWindow => Self::CreateNewWindow,
+            ServerCommand::SwitchToWindow(id) => Self::SwitchToWindow(id),
+            ServerCommand::FocusPane(d) => Self::FocusPane(d.into()),
         }
     }
 }
@@ -31,31 +58,6 @@ impl From<TermSize> for TermSizeDTO {
             rows: ts.rows,
             cols: ts.cols,
         }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum SessionCommand {
-    SplitFocusedWindow(SplitDirection),
-    CreateNewWindow,
-    SwitchToWindow(u16),
-    FocusPane(FocusDirection),
-}
-
-impl From<SessionCommand> for ServerCommandDTO {
-    fn from(c: SessionCommand) -> Self {
-        match c {
-            SessionCommand::SplitFocusedWindow(d) => Self::SplitFocusedWindow(d.into()),
-            SessionCommand::CreateNewWindow => Self::CreateNewWindow,
-            SessionCommand::SwitchToWindow(id) => Self::SwitchToWindow(id),
-            SessionCommand::FocusPane(d) => Self::FocusPane(d.into()),
-        }
-    }
-}
-
-impl From<SessionCommand> for ServerCommand {
-    fn from(c: SessionCommand) -> Self {
-        ServerCommand::Session(c)
     }
 }
 

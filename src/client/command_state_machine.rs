@@ -1,5 +1,5 @@
 use crate::client::business_objects::{
-    FocusDirection, ServerCommand, SessionCommand, SplitDirection,
+    ClientCommand, FocusDirection, ServerCommand, SplitDirection, WispCommand,
 };
 
 const PREFIX: u8 = 0x02; // Ctrl-b
@@ -21,9 +21,9 @@ impl CommandStateMachine {
         }
     }
 
-    pub fn parse_input(&mut self, bytes: Vec<u8>) -> (Vec<ServerCommand>, Vec<u8>) {
+    pub fn parse_input(&mut self, bytes: Vec<u8>) -> (Vec<WispCommand>, Vec<u8>) {
         let mut pass: Vec<u8> = Vec::new();
-        let mut commands: Vec<ServerCommand> = Vec::new();
+        let mut commands: Vec<WispCommand> = Vec::new();
 
         for b in bytes {
             // Copy the state OUT before matching, so the arms can call &mut self freely.
@@ -38,28 +38,28 @@ impl CommandStateMachine {
                 InputState::Prefix => {
                     match b {
                         PREFIX => pass.push(PREFIX), // prefix,prefix -> send a literal Ctrl-b
+                        b'd' => commands.push(ClientCommand::Detach.into()),
                         b'"' => commands.push(
-                            SessionCommand::SplitFocusedWindow(SplitDirection::SplitHorizontal)
+                            ServerCommand::SplitFocusedWindow(SplitDirection::SplitHorizontal)
                                 .into(),
                         ),
                         b'%' => commands.push(
-                            SessionCommand::SplitFocusedWindow(SplitDirection::SplitVertical)
-                                .into(),
+                            ServerCommand::SplitFocusedWindow(SplitDirection::SplitVertical).into(),
                         ),
-                        b'c' => commands.push(SessionCommand::CreateNewWindow.into()),
+                        b'c' => commands.push(ServerCommand::CreateNewWindow.into()),
                         b'h' => {
-                            commands.push(SessionCommand::FocusPane(FocusDirection::Left).into())
+                            commands.push(ServerCommand::FocusPane(FocusDirection::Left).into())
                         }
                         b'j' => {
-                            commands.push(SessionCommand::FocusPane(FocusDirection::Down).into())
+                            commands.push(ServerCommand::FocusPane(FocusDirection::Down).into())
                         }
-                        b'k' => commands.push(SessionCommand::FocusPane(FocusDirection::Up).into()),
+                        b'k' => commands.push(ServerCommand::FocusPane(FocusDirection::Up).into()),
                         b'l' => {
-                            commands.push(SessionCommand::FocusPane(FocusDirection::Right).into())
+                            commands.push(ServerCommand::FocusPane(FocusDirection::Right).into())
                         }
                         b'0'..=b'9' => {
                             let window_index = (b - b'0') as u16;
-                            commands.push(SessionCommand::SwitchToWindow(window_index).into());
+                            commands.push(ServerCommand::SwitchToWindow(window_index).into());
                         }
                         _ => {} // unknown command -> swallow
                     }

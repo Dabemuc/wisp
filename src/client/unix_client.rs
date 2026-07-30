@@ -12,7 +12,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use nix::pty::Winsize;
 
-use crate::client::business_objects::{ServerCommand, TermSize};
+use crate::client::business_objects::{ClientCommand, ServerCommand, TermSize, WispCommand};
 use crate::client::command_state_machine::CommandStateMachine;
 use crate::client::raw_mode_guard::RawModeGuard;
 use crate::client::ui::{draw_cursor, draw_ui};
@@ -22,6 +22,11 @@ const ROWS: u16 = 32;
 const COLS: u16 = 80;
 
 nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
+
+pub enum ClientCommandResult {
+    Exit,
+    None,
+}
 
 pub struct UnixClient {
     socket: UnixStream,
@@ -50,12 +55,19 @@ impl UnixClient {
     }
 
     /// The client is a thin async pump: keyboard + resize -> server, frames -> screen.
-    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        // Destructure up front: `into_split()` below partially moves `self`, which would
+        // make any later `self.*` method call a borrow-of-partially-moved error.
+        let UnixClient {
+            socket,
+            mut command_state_machine,
+        } = self;
+
         // Raw mode on the controlling terminal; restored automatically on drop (any exit path).
         let _raw = RawModeGuard::enable()?;
 
         // Split the socket so the reader task and this input loop don't fight over `&mut`.
-        let (mut rd, mut wr) = self.socket.into_split();
+        let (mut rd, mut wr) = socket.into_split();
 
         // Attach, reporting our terminal size (the server has no terminal to measure).
         // Shared so the reader task can read the CURRENT size when drawing the top bar,
@@ -140,6 +152,9 @@ impl UnixClient {
         // Terminal resize notifications, as an awaitable stream (no signal handler needed).
         let mut winch = signal(SignalKind::window_change())?;
 
+        // Set when a client-local command (e.g. Detach) asks us to leave the event loop.
+        let mut detached = false;
+
         loop {
             tokio::select! {
                 // Server disconnected (or we got detached) -> quit.
@@ -163,10 +178,20 @@ impl UnixClient {
                             // Parse input for commands
                             // TODO: This should be refactored to a ordered list of commands and
                             // input bytes. Currently "abc" + Ctrl-b h + "def" could become FocusPane first, then Input("abcdef")
-                            let (commands, remaining_bytes) = self.command_state_machine.parse_input(bytes);
+                            let (commands, remaining_bytes) = command_state_machine.parse_input(bytes);
                             // Send commands to server
                             for c in commands {
-                                write_msg(&mut wr, &ClientMessage::ExecuteServerCommand(c.into())).await?;
+                                match c {
+                                    WispCommand::Server(cmd) => write_msg(&mut wr, &ClientMessage::ExecuteServerCommand(cmd.into())).await?,
+                                    WispCommand::Client(cmd) => {
+                                        match handle_client_command(cmd) {
+                                            // Note: this `break` only leaves the `for`; the
+                                            // `detached` flag below leaves the event loop.
+                                            ClientCommandResult::Exit => { detached = true; break; }
+                                            ClientCommandResult::None => {}
+                                        }
+                                    },
+                                }
                             }
                             // Send non-command bytes to server
                             if !remaining_bytes.is_empty() {
@@ -176,6 +201,13 @@ impl UnixClient {
                         None => break, // reader thread ended (tty EOF)
                     }
                 }
+            }
+
+            // A client-local command asked us to leave (detach). Returning from `run`
+            // drops `_raw` (restores the terminal) and the socket halves (so the server
+            // prunes this client while the session keeps running).
+            if detached {
+                break;
             }
         }
 
@@ -190,6 +222,13 @@ impl UnixClient {
             &ClientMessage::ExecuteServerCommand(ServerCommand::KillServer.into()),
         )
         .await;
+    }
+}
+
+/// Handle a command that belongs to the client itself (never sent to the server).
+fn handle_client_command(cmd: ClientCommand) -> ClientCommandResult {
+    match cmd {
+        ClientCommand::Detach => ClientCommandResult::Exit,
     }
 }
 
